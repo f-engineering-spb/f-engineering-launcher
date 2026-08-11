@@ -9,4 +9,9 @@ if (-not (Test-Path -LiteralPath $backend)) {
   exit 1
 }
 
-python $backend --port $port
+$python = "python"
+if (Test-Path -LiteralPath "C:\Python314\python.exe") {
+  $python = "C:\Python314\python.exe"
+}
+
+& $python $backend --port $port
