@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import mimetypes
+from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -14,7 +15,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 FRONTEND_DIR = REPO_ROOT / "app" / "frontend"
 RUNTIME_DIR = REPO_ROOT / "runtime"
 MANIFESTS_DIR = RUNTIME_DIR / "manifests"
-VERSION = "0.2.0-v3-object-import"
+VERSION = "0.3.0-v3-left-panel"
 SKIP_DIR_NAMES = {".git", "__pycache__", "node_modules", ".venv", "venv"}
 
 
@@ -85,6 +86,7 @@ def scan_object(raw_path: str) -> dict:
         "id": object_id_for_path(root),
         "name": root.name,
         "rootPath": str(root.resolve()),
+        "scannedAt": datetime.now().isoformat(timespec="seconds"),
         "statistics": {
             "folders": folder_count,
             "files": file_count,
@@ -98,6 +100,39 @@ def scan_object(raw_path: str) -> dict:
         encoding="utf-8",
     )
     return manifest
+
+
+def manifest_path(object_id: str) -> Path:
+    return MANIFESTS_DIR / f"{object_id}.json"
+
+
+def load_manifest(object_id: str) -> dict | None:
+    path = manifest_path(object_id)
+    if not path.exists():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def manifest_summary(manifest: dict) -> dict:
+    return {
+        "id": manifest.get("id"),
+        "name": manifest.get("name"),
+        "rootPath": manifest.get("rootPath"),
+        "scannedAt": manifest.get("scannedAt"),
+        "statistics": manifest.get("statistics", {}),
+    }
+
+
+def list_object_summaries() -> list[dict]:
+    MANIFESTS_DIR.mkdir(parents=True, exist_ok=True)
+    manifests: list[dict] = []
+    for path in MANIFESTS_DIR.glob("*.json"):
+        try:
+            manifest = json.loads(path.read_text(encoding="utf-8"))
+            manifests.append(manifest_summary(manifest))
+        except (OSError, json.JSONDecodeError):
+            continue
+    return sorted(manifests, key=lambda item: str(item.get("scannedAt", "")), reverse=True)
 
 
 class LauncherHandler(BaseHTTPRequestHandler):
@@ -151,6 +186,19 @@ class LauncherHandler(BaseHTTPRequestHandler):
             )
             return
 
+        if parsed.path == "/api/objects":
+            self.send_json(HTTPStatus.OK, {"items": list_object_summaries()})
+            return
+
+        if parsed.path.startswith("/api/objects/"):
+            object_id = unquote(parsed.path.removeprefix("/api/objects/")).strip()
+            manifest = load_manifest(object_id)
+            if manifest:
+                self.send_json(HTTPStatus.OK, manifest)
+            else:
+                self.send_json(HTTPStatus.NOT_FOUND, {"error": "Объект не найден в manifest-хранилище"})
+            return
+
         self.serve_static(parsed.path)
 
     def do_POST(self) -> None:
@@ -178,6 +226,21 @@ class LauncherHandler(BaseHTTPRequestHandler):
                 self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
             return
 
+        if parsed.path == "/api/choose-folder":
+            try:
+                import tkinter as tk
+                from tkinter import filedialog
+
+                root = tk.Tk()
+                root.withdraw()
+                root.attributes("-topmost", True)
+                selected = filedialog.askdirectory(title="Выберите папку объекта для F-Engineering Launcher v3")
+                root.destroy()
+                self.send_json(HTTPStatus.OK, {"path": selected})
+            except Exception as error:
+                self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"Диалог выбора папки недоступен: {error}"})
+            return
+
         self.send_json(HTTPStatus.NOT_FOUND, {"error": "Маршрут не найден"})
 
     def serve_static(self, request_path: str) -> None:
@@ -195,6 +258,8 @@ class LauncherHandler(BaseHTTPRequestHandler):
             return
 
         content_type = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
+        if content_type.startswith("text/") or content_type in {"application/javascript", "text/javascript"}:
+            content_type = f"{content_type}; charset=utf-8"
         body = target.read_bytes()
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", content_type)
