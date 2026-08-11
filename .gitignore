@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Node / frontend tooling
+node_modules/
+dist/
+build/
+
+# Local runtime data
+runtime/cache/**
+runtime/manifests/**
+runtime/logs/**
+!runtime/cache/.gitkeep
+!runtime/manifests/.gitkeep
+!runtime/logs/.gitkeep
+
+# Generated previews and exports
+renders/
+output/
+tmp/
+temp/
+*.log
+
+# Secrets
+.env
+.env.*
+*.key
+*.token
+
+# OS
+.DS_Store
+Thumbs.db
