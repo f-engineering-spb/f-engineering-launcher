@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>F-Engineering Launcher v3</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main class="shell">
+    <aside class="sidebar">
+      <div class="brand"><span>F</span>-Engineering</div>
+      <section class="panel">
+        <h1>Launcher v3</h1>
+        <p>Чистый стартовый shell. Старые версии — только доноры.</p>
+      </section>
+      <section class="panel">
+        <h2>Следующие кирпичики</h2>
+        <ol>
+          <li>Загрузка объекта</li>
+          <li>Дерево файлов</li>
+          <li>PDF render/cache</li>
+          <li>Принятый viewer</li>
+        </ol>
+      </section>
+    </aside>
+    <section class="viewer">
+      <div class="viewer-card">
+        <div class="status-dot" id="statusDot"></div>
+        <h2>Контрольная точка v3</h2>
+        <p id="statusText">Проверяю локальный сервер…</p>
+        <pre id="healthBox"></pre>
+      </div>
+    </section>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>
