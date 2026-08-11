@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import mimetypes
 from http import HTTPStatus
@@ -12,7 +13,91 @@ from urllib.parse import unquote, urlparse
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FRONTEND_DIR = REPO_ROOT / "app" / "frontend"
 RUNTIME_DIR = REPO_ROOT / "runtime"
-VERSION = "0.1.0-v3-shell"
+MANIFESTS_DIR = RUNTIME_DIR / "manifests"
+VERSION = "0.2.0-v3-object-import"
+SKIP_DIR_NAMES = {".git", "__pycache__", "node_modules", ".venv", "venv"}
+
+
+def object_id_for_path(path: Path) -> str:
+    return hashlib.sha1(str(path.resolve()).casefold().encode("utf-8")).hexdigest()[:16]
+
+
+def file_extension(path: Path) -> str:
+    suffix = path.suffix.upper().lstrip(".")
+    return suffix or "NO_EXT"
+
+
+def build_tree(folder: Path) -> tuple[dict, dict[str, int], int, int]:
+    counts: dict[str, int] = {}
+    folder_count = 0
+    file_count = 0
+
+    def walk(current: Path) -> dict:
+        nonlocal folder_count, file_count
+        folder_count += 1
+        children = []
+        try:
+            entries = sorted(current.iterdir(), key=lambda item: (not item.is_dir(), item.name.casefold()))
+        except OSError as error:
+            return {
+                "type": "folder",
+                "name": current.name,
+                "path": str(current),
+                "error": str(error),
+                "children": [],
+            }
+
+        for entry in entries:
+            if entry.is_dir():
+                if entry.name in SKIP_DIR_NAMES:
+                    continue
+                children.append(walk(entry))
+            elif entry.is_file():
+                ext = file_extension(entry)
+                counts[ext] = counts.get(ext, 0) + 1
+                file_count += 1
+                children.append(
+                    {
+                        "type": "file",
+                        "name": entry.name,
+                        "path": str(entry),
+                        "extension": ext,
+                        "size": entry.stat().st_size,
+                    }
+                )
+
+        return {"type": "folder", "name": current.name, "path": str(current), "children": children}
+
+    return walk(folder), counts, folder_count, file_count
+
+
+def scan_object(raw_path: str) -> dict:
+    if not raw_path or not raw_path.strip():
+        raise ValueError("Путь к папке объекта пустой")
+    root = Path(raw_path.strip().strip('"')).expanduser()
+    if not root.exists():
+        raise FileNotFoundError(f"Папка не найдена: {root}")
+    if not root.is_dir():
+        raise NotADirectoryError(f"Это не папка: {root}")
+
+    tree, extension_counts, folder_count, file_count = build_tree(root)
+    manifest = {
+        "id": object_id_for_path(root),
+        "name": root.name,
+        "rootPath": str(root.resolve()),
+        "statistics": {
+            "folders": folder_count,
+            "files": file_count,
+            "extensions": extension_counts,
+        },
+        "tree": tree,
+    }
+    MANIFESTS_DIR.mkdir(parents=True, exist_ok=True)
+    (MANIFESTS_DIR / f"{manifest['id']}.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return manifest
 
 
 class LauncherHandler(BaseHTTPRequestHandler):
@@ -31,6 +116,13 @@ class LauncherHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def read_json(self) -> dict:
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        if length <= 0:
+            return {}
+        raw = self.rfile.read(length)
+        return json.loads(raw.decode("utf-8"))
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
@@ -60,6 +152,33 @@ class LauncherHandler(BaseHTTPRequestHandler):
             return
 
         self.serve_static(parsed.path)
+
+    def do_POST(self) -> None:
+        parsed = urlparse(self.path)
+        if parsed.path == "/api/objects/import":
+            try:
+                body = self.read_json()
+                manifest = scan_object(str(body.get("path", "")))
+                self.send_json(HTTPStatus.OK, manifest)
+            except (ValueError, FileNotFoundError, NotADirectoryError, OSError, json.JSONDecodeError) as error:
+                self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
+            return
+
+        if parsed.path == "/api/objects/exclude":
+            try:
+                body = self.read_json()
+                object_id = str(body.get("id", "")).strip()
+                if not object_id:
+                    raise ValueError("Не выбран объект для исключения")
+                target = MANIFESTS_DIR / f"{object_id}.json"
+                if target.exists():
+                    target.unlink()
+                self.send_json(HTTPStatus.OK, {"ok": True, "removed": object_id})
+            except (ValueError, OSError, json.JSONDecodeError) as error:
+                self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
+            return
+
+        self.send_json(HTTPStatus.NOT_FOUND, {"error": "Маршрут не найден"})
 
     def serve_static(self, request_path: str) -> None:
         relative = "index.html" if request_path in ("", "/") else unquote(request_path).lstrip("/")
@@ -92,7 +211,7 @@ def main() -> None:
 
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
     (RUNTIME_DIR / "cache").mkdir(exist_ok=True)
-    (RUNTIME_DIR / "manifests").mkdir(exist_ok=True)
+    MANIFESTS_DIR.mkdir(exist_ok=True)
     (RUNTIME_DIR / "logs").mkdir(exist_ok=True)
 
     server = ThreadingHTTPServer((args.host, args.port), LauncherHandler)
