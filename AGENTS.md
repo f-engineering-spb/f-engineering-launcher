@@ -18,6 +18,11 @@ Do not treat old local Launcher folders, Google Drive virtual disks, exported de
 - Keep frontend, backend, render pipeline, and runtime data separated.
 - After each meaningful change, run a local smoke test and record the result in the handoff/summary.
 - Preserve accepted viewer behavior unless the user explicitly changes it.
+- Treat Cyrillic text as a first-class project requirement. All source, docs, JSON manifests, HTML, CSS, JS, and Python files must be UTF-8.
+- Do not judge Cyrillic correctness from raw PowerShell output alone: Windows console encoding can display valid UTF-8 as mojibake. Verify text with UTF-8-aware checks, browser rendering, or Python `unicode_escape` inspection when needed.
+- Static text assets served by the backend must include `charset=utf-8` for text content types.
+- If mojibake appears in committed source text, stop and fix encoding before adding product logic.
+- See `docs/ENCODING.md` before editing Russian UI labels, backend messages, manifests, or generated text.
 
 ## Product direction
 
