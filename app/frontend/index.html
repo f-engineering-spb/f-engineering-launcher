@@ -11,25 +11,27 @@
     <aside class="sidebar">
       <div class="brand"><span>F</span>-Engineering</div>
       <section class="panel">
-        <h1>Launcher v3</h1>
-        <p>Чистый стартовый shell. Старые версии — только доноры.</p>
+        <h1>Объект</h1>
+        <p>Вставь путь к локальной папке объекта. Диалог выбора добавим позже, без старых хвостов.</p>
+        <label class="path-label" for="objectPath">Путь к папке</label>
+        <textarea id="objectPath" rows="3" spellcheck="false" placeholder="C:\Users\a9379\Documents\Legenda_Leningradskoe"></textarea>
+        <div class="button-row">
+          <button id="loadObject" type="button">Загрузить объект</button>
+          <button id="refreshObject" type="button" disabled>Обновить объект</button>
+          <button id="excludeObject" type="button" disabled>Исключить объект</button>
+        </div>
       </section>
       <section class="panel">
-        <h2>Следующие кирпичики</h2>
-        <ol>
-          <li>Загрузка объекта</li>
-          <li>Дерево файлов</li>
-          <li>PDF render/cache</li>
-          <li>Принятый viewer</li>
-        </ol>
+        <h2>Статистика</h2>
+        <div class="stats" id="objectStats">Объект не загружен</div>
       </section>
     </aside>
     <section class="viewer">
-      <div class="viewer-card">
+      <div class="viewer-card tree-card">
         <div class="status-dot" id="statusDot"></div>
-        <h2>Контрольная точка v3</h2>
+        <h2>Дерево объекта</h2>
         <p id="statusText">Проверяю локальный сервер…</p>
-        <pre id="healthBox"></pre>
+        <div class="tree" id="objectTree"></div>
       </div>
     </section>
   </main>
