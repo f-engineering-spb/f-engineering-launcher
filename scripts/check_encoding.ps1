@@ -7,21 +7,9 @@ $env:PYTHONUTF8 = "1"
 $env:PYTHONIOENCODING = "utf-8"
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$backend = Join-Path $repoRoot "app\backend\server.py"
-$port = 8780
-
-if (-not (Test-Path -LiteralPath $backend)) {
-  Write-Host "Backend is not implemented yet: $backend"
-  exit 1
-}
-
 $python = "python"
 if (Test-Path -LiteralPath "C:\Python314\python.exe") {
   $python = "C:\Python314\python.exe"
 }
 
-Write-Host "F-Engineering Launcher v3"
-Write-Host "UTF-8 console bootstrap enabled"
-Write-Host "Open: http://127.0.0.1:$port/"
-
-& $python $backend --port $port
+& $python (Join-Path $repoRoot "scripts\check_encoding.py")

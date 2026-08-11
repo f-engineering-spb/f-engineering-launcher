@@ -13,6 +13,7 @@ build/
 runtime/cache/**
 runtime/manifests/**
 runtime/logs/**
+runtime/bench/**
 !runtime/cache/.gitkeep
 !runtime/manifests/.gitkeep
 !runtime/logs/.gitkeep

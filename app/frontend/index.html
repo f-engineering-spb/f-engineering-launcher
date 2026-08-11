@@ -40,8 +40,25 @@
       </section>
     </aside>
 
-    <section class="viewer" aria-label="Правая область пока оставлена пустой">
-      <div class="viewer-empty"></div>
+    <section class="viewer" aria-label="Область просмотра PDF">
+      <div class="pdf-viewer" id="pdfViewer">
+        <div class="pdf-thumbs" id="pdfThumbs"></div>
+        <div class="pdf-stage" id="pdfStage">
+          <div class="viewer-empty" id="viewerEmpty">Выберите PDF в дереве и нажмите «Отобразить».</div>
+          <div class="quality-badge" id="qualityBadge" hidden>Обзор 150 DPI</div>
+          <img id="pdfPageImage" alt="Отрендеренная страница PDF" hidden>
+          <div class="viewer-controls" id="viewerControls" hidden>
+            <button id="viewZoomOut" type="button" title="Уменьшить">−</button>
+            <button id="viewZoomIn" type="button" title="Увеличить">+</button>
+            <button id="viewFit" type="button" title="Вписать страницу">Вписать</button>
+            <button id="viewRotate" type="button" title="Повернуть на 90°">⟳</button>
+            <button id="viewPanMode" type="button" title="Рука / стрелка">✋</button>
+            <button id="viewStandardMode" type="button" title="Стандартный режим: левая панель, миниатюры и просмотр">▦</button>
+            <button id="viewMediumMode" type="button" title="Средний режим: скрыть левую панель, оставить миниатюры">▤</button>
+            <button id="viewFullMode" type="button" title="Полный просмотр: скрыть левую панель и миниатюры">▢</button>
+          </div>
+        </div>
+      </div>
     </section>
   </main>
   <script src="app.js"></script>

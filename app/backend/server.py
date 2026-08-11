@@ -4,6 +4,9 @@ import argparse
 import hashlib
 import json
 import mimetypes
+import shutil
+import subprocess
+import time
 from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -15,8 +18,23 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 FRONTEND_DIR = REPO_ROOT / "app" / "frontend"
 RUNTIME_DIR = REPO_ROOT / "runtime"
 MANIFESTS_DIR = RUNTIME_DIR / "manifests"
-VERSION = "0.3.0-v3-left-panel"
+PDF_CACHE_DIR = RUNTIME_DIR / "cache" / "pdf"
+VERSION = "0.4.0-v3-pdf-render"
 SKIP_DIR_NAMES = {".git", "__pycache__", "node_modules", ".venv", "venv"}
+DEFAULT_PDF_DPI = 300
+PDF_PAGE_TIMEOUT_SECONDS = 25
+PDF_DOCUMENT_TIMEOUT_SECONDS = 75
+POPPLER_BIN_DIR = (
+    Path.home()
+    / ".cache"
+    / "codex-runtimes"
+    / "codex-primary-runtime"
+    / "dependencies"
+    / "native"
+    / "poppler"
+    / "Library"
+    / "bin"
+)
 
 
 def object_id_for_path(path: Path) -> str:
@@ -135,6 +153,218 @@ def list_object_summaries() -> list[dict]:
     return sorted(manifests, key=lambda item: str(item.get("scannedAt", "")), reverse=True)
 
 
+def pdf_cache_key(path: Path, dpi: int) -> str:
+    stat = path.stat()
+    raw = f"{path.resolve()}|{stat.st_mtime_ns}|{stat.st_size}|{dpi}"
+    return hashlib.sha1(raw.casefold().encode("utf-8")).hexdigest()[:20]
+
+
+def poppler_tool(name: str) -> str | None:
+    exe = POPPLER_BIN_DIR / f"{name}.exe"
+    if exe.exists():
+        return str(exe)
+    found = shutil.which(name)
+    if found and not found.lower().endswith(".cmd"):
+        return found
+    return found
+
+
+def run_poppler(args: list[str], timeout: int) -> subprocess.CompletedProcess[str]:
+    process = subprocess.Popen(
+        args,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired as error:
+        process.kill()
+        stdout, stderr = process.communicate()
+        raise subprocess.TimeoutExpired(args, timeout, output=stdout, stderr=stderr) from error
+    return subprocess.CompletedProcess(args=args, returncode=process.returncode, stdout=stdout, stderr=stderr)
+
+
+def pdf_page_count(path: Path) -> int:
+    pdfinfo = poppler_tool("pdfinfo")
+    if not pdfinfo:
+        raise RuntimeError("pdfinfo не найден. Нужен Poppler из runtime.")
+    result = run_poppler(
+        [pdfinfo, str(path)],
+        timeout=60,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "pdfinfo не смог прочитать PDF")
+    for line in result.stdout.splitlines():
+        if line.startswith("Pages:"):
+            return int(line.split(":", 1)[1].strip())
+    raise RuntimeError("pdfinfo не вернул количество страниц PDF")
+
+
+def render_pdf(path: Path, dpi: int = DEFAULT_PDF_DPI) -> dict:
+    if not path.exists():
+        raise FileNotFoundError(f"PDF не найден: {path}")
+    if not path.is_file() or path.suffix.casefold() != ".pdf":
+        raise ValueError(f"Это не PDF-файл: {path}")
+
+    pdftoppm = poppler_tool("pdftoppm")
+    if not pdftoppm:
+        raise RuntimeError("pdftoppm не найден. Нужен Poppler из runtime.")
+
+    page_count = pdf_page_count(path)
+    started_at = time.monotonic()
+    key = pdf_cache_key(path, dpi)
+    target_dir = PDF_CACHE_DIR / key
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    pages = []
+    errors = []
+    rendered_count = 0
+    cache_hit_count = 0
+
+    for page in range(1, page_count + 1):
+        if time.monotonic() - started_at > PDF_DOCUMENT_TIMEOUT_SECONDS:
+            for skipped_page in range(page, page_count + 1):
+                errors.append({"page": skipped_page, "error": f"PDF остановлен по лимиту {PDF_DOCUMENT_TIMEOUT_SECONDS} сек. на файл."})
+            break
+
+        png = target_dir / f"page-{page}.png"
+        if png.exists() and png.stat().st_size > 0:
+            cache_hit_count += 1
+        else:
+            for stale in target_dir.glob(f"page-{page}*.png"):
+                stale.unlink()
+            prefix = target_dir / f"page-{page}"
+            try:
+                result = run_poppler(
+                    [
+                        pdftoppm,
+                        "-f",
+                        str(page),
+                        "-l",
+                        str(page),
+                        "-singlefile",
+                        "-r",
+                        str(dpi),
+                        "-png",
+                        str(path),
+                        str(prefix),
+                    ],
+                    timeout=PDF_PAGE_TIMEOUT_SECONDS,
+                )
+                candidate = target_dir / f"page-{page}.png"
+                if result.returncode != 0:
+                    raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "pdftoppm не смог отрендерить страницу")
+                if not candidate.exists() or candidate.stat().st_size <= 0:
+                    raise RuntimeError("pdftoppm не создал PNG страницы")
+                rendered_count += 1
+            except subprocess.TimeoutExpired:
+                errors.append({"page": page, "error": f"Таймаут рендера страницы {page}: {PDF_PAGE_TIMEOUT_SECONDS} сек."})
+                continue
+            except (RuntimeError, OSError) as error:
+                errors.append({"page": page, "error": str(error)})
+                continue
+
+        if png.exists() and png.stat().st_size > 0:
+            pages.append(
+                {
+                    "page": page,
+                    "name": f"{path.name} · стр. {page}",
+                    "url": f"/cache/pdf/{key}/{png.name}",
+                    "bytes": png.stat().st_size,
+                }
+            )
+
+    if not pages:
+        result = run_poppler(
+            [pdftoppm, "-v"],
+            timeout=10,
+        )
+        tool_version = (result.stderr or result.stdout).strip()
+        raise RuntimeError(f"Не удалось отрендерить ни одной страницы PDF. {tool_version}. Ошибки: {errors}")
+
+    return {
+        "name": path.name,
+        "path": str(path),
+        "dpi": dpi,
+        "pages": page_count,
+        "renderedPages": len(pages),
+        "cacheKey": key,
+        "cacheHit": cache_hit_count == page_count,
+        "cacheHitPages": cache_hit_count,
+        "newRenderedPages": rendered_count,
+        "errors": errors,
+        "items": pages,
+    }
+
+
+def render_pdf_page(path: Path, page: int, dpi: int = DEFAULT_PDF_DPI) -> dict:
+    if not path.exists():
+        raise FileNotFoundError(f"PDF не найден: {path}")
+    if not path.is_file() or path.suffix.casefold() != ".pdf":
+        raise ValueError(f"Это не PDF-файл: {path}")
+
+    pdftoppm = poppler_tool("pdftoppm")
+    if not pdftoppm:
+        raise RuntimeError("pdftoppm не найден. Нужен Poppler из runtime.")
+
+    page_count = pdf_page_count(path)
+    if page < 1 or page > page_count:
+        raise ValueError(f"Страница {page} вне диапазона 1-{page_count}")
+
+    key = pdf_cache_key(path, dpi)
+    target_dir = PDF_CACHE_DIR / key
+    target_dir.mkdir(parents=True, exist_ok=True)
+    png = target_dir / f"page-{page}.png"
+    cache_hit = png.exists() and png.stat().st_size > 0
+
+    if not cache_hit:
+        for stale in target_dir.glob(f"page-{page}*.png"):
+            stale.unlink()
+        prefix = target_dir / f"page-{page}"
+        try:
+            result = run_poppler(
+                [
+                    pdftoppm,
+                    "-f",
+                    str(page),
+                    "-l",
+                    str(page),
+                    "-singlefile",
+                    "-r",
+                    str(dpi),
+                    "-png",
+                    str(path),
+                    str(prefix),
+                ],
+                timeout=PDF_PAGE_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired as error:
+            raise RuntimeError(f"Таймаут рендера страницы {page}: {PDF_PAGE_TIMEOUT_SECONDS} сек.") from error
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "pdftoppm не смог отрендерить страницу")
+        if not png.exists() or png.stat().st_size <= 0:
+            raise RuntimeError("pdftoppm не создал PNG страницы")
+
+    return {
+        "name": path.name,
+        "path": str(path),
+        "dpi": dpi,
+        "pages": page_count,
+        "page": page,
+        "cacheKey": key,
+        "cacheHit": cache_hit,
+        "item": {
+            "page": page,
+            "name": f"{path.name} · стр. {page}",
+            "url": f"/cache/pdf/{key}/{png.name}",
+            "bytes": png.stat().st_size,
+        },
+    }
+
+
 class LauncherHandler(BaseHTTPRequestHandler):
     server_version = "FEngineeringLauncherV3/0.1"
 
@@ -199,6 +429,10 @@ class LauncherHandler(BaseHTTPRequestHandler):
                 self.send_json(HTTPStatus.NOT_FOUND, {"error": "Объект не найден в manifest-хранилище"})
             return
 
+        if parsed.path.startswith("/cache/"):
+            self.serve_cache(parsed.path)
+            return
+
         self.serve_static(parsed.path)
 
     def do_POST(self) -> None:
@@ -241,7 +475,77 @@ class LauncherHandler(BaseHTTPRequestHandler):
                 self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"Диалог выбора папки недоступен: {error}"})
             return
 
+        if parsed.path == "/api/pdf/render":
+            try:
+                body = self.read_json()
+                raw_files = body.get("files", [])
+                dpi = int(body.get("dpi") or DEFAULT_PDF_DPI)
+                if dpi < 72 or dpi > 600:
+                    raise ValueError("DPI должен быть в диапазоне 72-600")
+                if not isinstance(raw_files, list) or not raw_files:
+                    raise ValueError("Не выбраны PDF-файлы для отображения")
+                if len(raw_files) > 25:
+                    raise ValueError("За один раз пока можно отрендерить не больше 25 PDF")
+                documents = [render_pdf(Path(str(file_path)), dpi=dpi) for file_path in raw_files]
+                document_errors = [
+                    {"document": document["name"], "path": document["path"], **error}
+                    for document in documents
+                    for error in document.get("errors", [])
+                ]
+                self.send_json(
+                    HTTPStatus.OK,
+                    {
+                        "dpi": dpi,
+                        "documents": documents,
+                        "totalPages": sum(document["pages"] for document in documents),
+                        "renderedPages": sum(document["renderedPages"] for document in documents),
+                        "errors": document_errors,
+                        "renderedAt": datetime.now().isoformat(timespec="seconds"),
+                    },
+                )
+            except (ValueError, FileNotFoundError, RuntimeError, OSError, subprocess.TimeoutExpired, json.JSONDecodeError) as error:
+                self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
+            return
+
+        if parsed.path == "/api/pdf/page":
+            try:
+                body = self.read_json()
+                raw_file = str(body.get("file", "")).strip()
+                page = int(body.get("page") or 1)
+                dpi = int(body.get("dpi") or DEFAULT_PDF_DPI)
+                if dpi < 72 or dpi > 600:
+                    raise ValueError("DPI должен быть в диапазоне 72-600")
+                if not raw_file:
+                    raise ValueError("Не выбран PDF-файл для отображения")
+                self.send_json(HTTPStatus.OK, render_pdf_page(Path(raw_file), page=page, dpi=dpi))
+            except (ValueError, FileNotFoundError, RuntimeError, OSError, subprocess.TimeoutExpired, json.JSONDecodeError) as error:
+                self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
+            return
+
         self.send_json(HTTPStatus.NOT_FOUND, {"error": "Маршрут не найден"})
+
+    def serve_cache(self, request_path: str) -> None:
+        relative = unquote(request_path).removeprefix("/cache/").lstrip("/")
+        target = (RUNTIME_DIR / "cache" / relative).resolve()
+
+        try:
+            target.relative_to((RUNTIME_DIR / "cache").resolve())
+        except ValueError:
+            self.send_error(HTTPStatus.FORBIDDEN, "Forbidden")
+            return
+
+        if not target.exists() or not target.is_file():
+            self.send_error(HTTPStatus.NOT_FOUND, "Not found")
+            return
+
+        content_type = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
+        body = target.read_bytes()
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Cache-Control", "private, max-age=31536000, immutable")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def serve_static(self, request_path: str) -> None:
         relative = "index.html" if request_path in ("", "/") else unquote(request_path).lstrip("/")
@@ -276,6 +580,7 @@ def main() -> None:
 
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
     (RUNTIME_DIR / "cache").mkdir(exist_ok=True)
+    PDF_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     MANIFESTS_DIR.mkdir(exist_ok=True)
     (RUNTIME_DIR / "logs").mkdir(exist_ok=True)
 

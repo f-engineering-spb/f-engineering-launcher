@@ -23,6 +23,8 @@ Do not treat old local Launcher folders, Google Drive virtual disks, exported de
 - Static text assets served by the backend must include `charset=utf-8` for text content types.
 - If mojibake appears in committed source text, stop and fix encoding before adding product logic.
 - See `docs/ENCODING.md` before editing Russian UI labels, backend messages, manifests, or generated text.
+- Always start Launcher v3 through `scripts/start_windows.cmd`; do not start the backend with ad-hoc PowerShell snippets when Russian paths, labels, or Google Drive paths are involved.
+- Always run `scripts/check_encoding.cmd` before and after changes that touch Russian text, Windows paths, backend messages, frontend labels, or docs.
 
 ## Product direction
 
@@ -30,6 +32,18 @@ Launcher v3 should be built from verified bricks:
 
 1. object list and object import/update/exclude;
 2. tree and format filters;
-3. PDF render/cache pipeline;
+3. accepted PDF render/cache pipeline: mass overview at `150 DPI`, active page at `300 DPI`;
 4. accepted viewer controls: thumbnails, zoom, fit, pan, hand/arrow, medium/full modes;
 5. later: Word, Excel, images, DWG strategy, and modules.
+
+## Session handoff
+
+Before the next product-development session, read `docs/HANDOFF_2026-08-12.md` and `docs/ROADMAP.md`.
+
+The accepted state at the end of 2026-08-12:
+
+- object shell works;
+- wide tree browsing for long file names works;
+- PDF overview/quality split works;
+- viewer quality indicator works;
+- next direction is design polish and universal preview support for DWG, Word, Excel, and images.

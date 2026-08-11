@@ -1,75 +1,53 @@
 # UTF-8 and Cyrillic rules
 
-Launcher contains Russian UI labels, object names, paths, backend errors, and generated manifests. Encoding mistakes are product bugs, not cosmetic noise.
+Launcher contains Russian UI labels, object names, paths, backend errors, and generated manifests. Encoding mistakes are product bugs.
 
-## Project rule
+## Permanent project solution
 
-Use UTF-8 everywhere:
-
-- `.py`, `.js`, `.html`, `.css`, `.md`, `.json`, `.ps1`
-- frontend labels and tooltips
-- backend JSON responses and error messages
-- manifests and runtime metadata
-- documentation and handoff notes
-
-## Known trap
-
-PowerShell on Windows can show valid UTF-8 Russian text as mojibake. Examples:
-
-- `Загрузить` may appear as `Р—Р°РіСЂСѓР·РёС‚СЊ`
-- `Объект` may appear as `РћР±СЉРµРєС‚`
-
-Do not decide that a file is broken only because `Get-Content` displayed mojibake.
-
-## Verification algorithm
-
-When Cyrillic looks suspicious:
-
-1. Read the file explicitly as UTF-8.
-2. Inspect with a UTF-8-safe method.
-3. Check for mojibake markers in source files. Do not scan this instruction file itself, because it intentionally contains mojibake examples.
-4. Confirm the browser receives `charset=utf-8` for text files.
-
-PowerShell/Python check:
+Use the project bootstrap scripts instead of ad-hoc PowerShell snippets:
 
 ```powershell
-@'
-from pathlib import Path
-
-paths = [
-    "app/frontend/index.html",
-    "app/frontend/app.js",
-    "app/frontend/styles.css",
-    "app/backend/server.py",
-    "AGENTS.md",
-]
-
-bad_markers = ["\u0420\u045f", "\u0420\u045b", "\u0420\u2014", "\u0421\u0453", "\u00d0", "\u00d1"]
-
-for path in paths:
-    text = Path(path).read_text(encoding="utf-8")
-    hits = [marker for marker in bad_markers if marker in text]
-    print(path, "OK" if not hits else f"MOJIBAKE? {hits}")
-    print(text[:240].encode("unicode_escape").decode("ascii"))
-'@ | python -
+.\scripts\start_windows.cmd
 ```
 
-HTTP check:
+This is mandatory for agents and recommended for manual work. If Launcher was started by a raw PowerShell command, restart it through this script before testing Cyrillic paths or PDF files from Google Drive Desktop.
+
+For encoding checks:
 
 ```powershell
-$response = Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8780/
-$response.Headers['Content-Type']
+.\scripts\check_encoding.cmd
 ```
 
-Expected:
+These scripts set:
 
-```text
-text/html; charset=utf-8
+- PowerShell input/output encoding to UTF-8;
+- `$OutputEncoding` to UTF-8;
+- `PYTHONUTF8=1`;
+- `PYTHONIOENCODING=utf-8`.
+
+## What this solves
+
+It prevents the normal development path from corrupting or misdisplaying Russian text in:
+
+- Python output;
+- JSON responses;
+- frontend labels;
+- backend messages;
+- paths shown during checks.
+
+## Known Windows trap
+
+Raw `Get-Content`, inline PowerShell strings, and copied Russian paths can still display or pass text incorrectly if the current console is not UTF-8. When checking Cyrillic, prefer:
+
+```powershell
+.\scripts\check_encoding.cmd
 ```
+
+Do not decide that a file is broken only because a raw PowerShell command displayed mojibake.
 
 ## Backend serving rule
 
-When serving static frontend files from Python, add charset for text content:
+Static text files must include `charset=utf-8`:
 
 ```python
 content_type = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
@@ -84,14 +62,14 @@ json.dumps(payload, ensure_ascii=False).encode("utf-8")
 Content-Type: application/json; charset=utf-8
 ```
 
-## Editing rule for agents
+## Agent rule
 
-Before changing UI/backend Russian text:
+Before changing Russian UI/backend text:
 
-1. Check `AGENTS.md` and this file.
+1. Use UTF-8 bootstrap scripts.
 2. Edit files as UTF-8.
-3. Run syntax checks.
-4. Run the mojibake marker check above.
-5. Run a local browser/API smoke test.
+3. Run `.\scripts\check_encoding.cmd`.
+4. Run syntax checks.
+5. Run local API/browser smoke test.
 
-Do not continue with product logic if committed source contains mojibake.
+Do not add product logic on top of corrupted Cyrillic.

@@ -36,3 +36,19 @@ runtime/         Local runtime folders only; caches/logs are ignored by Git.
 ## Start status
 
 This repository has been initialized as the clean v3 home for Launcher. Old local Launcher folders are donors only; they are not the working source of truth.
+
+## Current accepted state
+
+As of 2026-08-12, Launcher v3 has a functioning local shell for:
+
+- object import/update/exclude;
+- object tree and format filters;
+- wide tree browsing for long file names;
+- PDF overview rendering at `150 DPI`;
+- active PDF page quality rendering at `300 DPI`;
+- cached PDF previews;
+- viewer controls for thumbnails, zoom, fit, rotate, pan, and view modes.
+
+The next direction is design polish and a universal preview layer for DWG, Word, Excel, and common image formats.
+
+See `docs/HANDOFF_2026-08-12.md` before continuing development.
