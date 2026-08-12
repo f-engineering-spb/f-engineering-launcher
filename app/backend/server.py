@@ -20,11 +20,14 @@ FRONTEND_DIR = REPO_ROOT / "app" / "frontend"
 RUNTIME_DIR = REPO_ROOT / "runtime"
 MANIFESTS_DIR = RUNTIME_DIR / "manifests"
 PDF_CACHE_DIR = RUNTIME_DIR / "cache" / "pdf"
+WORD_CACHE_DIR = RUNTIME_DIR / "cache" / "word"
+WORD_CONVERT_SCRIPT = REPO_ROOT / "scripts" / "convert_word_to_pdf.ps1"
 VERSION = "0.4.0-v3-pdf-render"
 SKIP_DIR_NAMES = {".git", "__pycache__", "node_modules", ".venv", "venv"}
 DEFAULT_PDF_DPI = 300
 PDF_PAGE_TIMEOUT_SECONDS = 25
 PDF_DOCUMENT_TIMEOUT_SECONDS = 75
+WORD_CONVERT_TIMEOUT_SECONDS = 120
 POPPLER_BIN_DIR = (
     Path.home()
     / ".cache"
@@ -160,6 +163,16 @@ def pdf_cache_key(path: Path, dpi: int) -> str:
     return hashlib.sha1(raw.casefold().encode("utf-8")).hexdigest()[:20]
 
 
+def file_cache_key(path: Path, purpose: str) -> str:
+    stat = path.stat()
+    raw = f"{purpose}|{path.resolve()}|{stat.st_mtime_ns}|{stat.st_size}"
+    return hashlib.sha1(raw.casefold().encode("utf-8")).hexdigest()[:20]
+
+
+def is_word_file(path: Path) -> bool:
+    return path.suffix.casefold() in {".doc", ".docx"}
+
+
 def pdf_page_item(path: Path, key: str, page: int, png: Path) -> dict:
     return {
         "page": page,
@@ -282,6 +295,94 @@ def pdf_page_count(path: Path) -> int:
         if line.startswith("Pages:"):
             return int(line.split(":", 1)[1].strip())
     raise RuntimeError("pdfinfo не вернул количество страниц PDF")
+
+
+def word_to_pdf(path: Path) -> tuple[Path, bool]:
+    if not path.exists():
+        raise FileNotFoundError(f"Word-файл не найден: {path}")
+    if not path.is_file() or not is_word_file(path):
+        raise ValueError(f"Это не Word-файл: {path}")
+    if not WORD_CONVERT_SCRIPT.exists():
+        raise RuntimeError(f"Скрипт конвертации Word не найден: {WORD_CONVERT_SCRIPT}")
+
+    key = file_cache_key(path, "word-pdf")
+    target_dir = WORD_CACHE_DIR / key
+    target_dir.mkdir(parents=True, exist_ok=True)
+    pdf_path = target_dir / f"{path.stem}.pdf"
+    manifest_path = target_dir / "manifest.json"
+
+    cached = False
+    if pdf_path.exists() and pdf_path.stat().st_size > 0 and manifest_path.exists():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            cached = (
+                manifest.get("sourcePath") == str(path)
+                and manifest.get("cacheKey") == key
+                and manifest.get("sourceMtimeNs") == path.stat().st_mtime_ns
+                and manifest.get("sourceSize") == path.stat().st_size
+            )
+        except (OSError, json.JSONDecodeError):
+            cached = False
+
+    if cached:
+        return pdf_path, True
+
+    if pdf_path.exists():
+        pdf_path.unlink()
+
+    process = subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(WORD_CONVERT_SCRIPT),
+            "-InputPath",
+            str(path),
+            "-OutputPath",
+            str(pdf_path),
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=WORD_CONVERT_TIMEOUT_SECONDS,
+    )
+    if process.returncode != 0:
+        message = process.stderr.strip() or process.stdout.strip() or "Word не смог конвертировать документ в PDF"
+        raise RuntimeError(message)
+    if not pdf_path.exists() or pdf_path.stat().st_size <= 0:
+        raise RuntimeError("Word не создал PDF для preview")
+
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "sourcePath": str(path),
+                "sourceName": path.name,
+                "sourceMtimeNs": path.stat().st_mtime_ns,
+                "sourceSize": path.stat().st_size,
+                "cacheKey": key,
+                "pdfPath": str(pdf_path),
+                "convertedAt": datetime.now().isoformat(timespec="seconds"),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    return pdf_path, False
+
+
+def render_word(path: Path, dpi: int = DEFAULT_PDF_DPI) -> dict:
+    pdf_path, convert_cache_hit = word_to_pdf(path)
+    document = render_pdf(pdf_path, dpi=dpi)
+    document["sourcePath"] = str(path)
+    document["sourceName"] = path.name
+    document["sourceType"] = file_extension(path)
+    document["convertedPdfPath"] = str(pdf_path)
+    document["convertCacheHit"] = convert_cache_hit
+    return document
 
 
 def render_pdf(path: Path, dpi: int = DEFAULT_PDF_DPI) -> dict:
@@ -495,6 +596,7 @@ class LauncherHandler(BaseHTTPRequestHandler):
                     "version": VERSION,
                     "repoRoot": str(REPO_ROOT),
                     "runtime": str(RUNTIME_DIR),
+                    "wordPreview": True,
                 },
             )
             return
@@ -613,6 +715,59 @@ class LauncherHandler(BaseHTTPRequestHandler):
                 if not raw_file:
                     raise ValueError("Не выбран PDF-файл для отображения")
                 self.send_json(HTTPStatus.OK, render_pdf_page(Path(raw_file), page=page, dpi=dpi))
+            except (ValueError, FileNotFoundError, RuntimeError, OSError, subprocess.TimeoutExpired, json.JSONDecodeError) as error:
+                self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
+            return
+
+        if parsed.path == "/api/word/render":
+            try:
+                body = self.read_json()
+                raw_files = body.get("files", [])
+                dpi = int(body.get("dpi") or DEFAULT_PDF_DPI)
+                if dpi < 72 or dpi > 600:
+                    raise ValueError("DPI должен быть в диапазоне 72-600")
+                if not isinstance(raw_files, list) or not raw_files:
+                    raise ValueError("Не выбраны Word-файлы для отображения")
+                if len(raw_files) > 10:
+                    raise ValueError("За один раз пока можно отрендерить не больше 10 Word-файлов")
+                documents = [render_word(Path(str(file_path)), dpi=dpi) for file_path in raw_files]
+                document_errors = [
+                    {"document": document["name"], "path": document["path"], **error}
+                    for document in documents
+                    for error in document.get("errors", [])
+                ]
+                self.send_json(
+                    HTTPStatus.OK,
+                    {
+                        "dpi": dpi,
+                        "documents": documents,
+                        "totalPages": sum(document["pages"] for document in documents),
+                        "renderedPages": sum(document["renderedPages"] for document in documents),
+                        "errors": document_errors,
+                        "renderedAt": datetime.now().isoformat(timespec="seconds"),
+                    },
+                )
+            except (ValueError, FileNotFoundError, RuntimeError, OSError, subprocess.TimeoutExpired, json.JSONDecodeError) as error:
+                self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
+            return
+
+        if parsed.path == "/api/word/page":
+            try:
+                body = self.read_json()
+                raw_file = str(body.get("file", "")).strip()
+                page = int(body.get("page") or 1)
+                dpi = int(body.get("dpi") or DEFAULT_PDF_DPI)
+                if dpi < 72 or dpi > 600:
+                    raise ValueError("DPI должен быть в диапазоне 72-600")
+                if not raw_file:
+                    raise ValueError("Не выбран Word-файл для отображения")
+                pdf_path, convert_cache_hit = word_to_pdf(Path(raw_file))
+                payload = render_pdf_page(pdf_path, page=page, dpi=dpi)
+                payload["sourcePath"] = raw_file
+                payload["sourceType"] = file_extension(Path(raw_file))
+                payload["convertedPdfPath"] = str(pdf_path)
+                payload["convertCacheHit"] = convert_cache_hit
+                self.send_json(HTTPStatus.OK, payload)
             except (ValueError, FileNotFoundError, RuntimeError, OSError, subprocess.TimeoutExpired, json.JSONDecodeError) as error:
                 self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
             return

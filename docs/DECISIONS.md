@@ -72,3 +72,21 @@ Reason:
 - real project files can differ by sheet number while clearly describing the same drawing;
 - false negatives are common with numeric-only matching;
 - false positives across different sections are more dangerous than missing a rare pair.
+
+## 2026-08-12 - Vortex Word preview uses Word-to-PDF cache
+
+Word documents are previewed through the existing PDF pipeline.
+
+Decision:
+
+- `.doc` and `.docx` are converted by Microsoft Word to PDF cache;
+- generated PDFs are rendered by the accepted PDF preview pipeline;
+- `.gdoc` is treated as a Google Docs shortcut, not as a local Word document;
+- `.gdoc` is visible/selectable/openable but does not get a local preview.
+
+Reason:
+
+- Microsoft Word is installed locally;
+- the PDF viewer is already accepted;
+- building a second Word viewer is unnecessary;
+- Google Docs shortcuts are links, not actual DOCX content.

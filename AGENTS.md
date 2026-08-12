@@ -48,7 +48,8 @@ The accepted state at the end of 2026-08-12:
 - viewer quality indicator works;
 - DWG/PDF pairing works and is accepted for the current stage;
 - DWG opens through the Windows native/default application;
-- next direction is universal preview support for Word, Excel, and images, plus optional DWG pair diagnostics.
+- Vortex Word preview works and is accepted for the current stage;
+- next direction is Excel preview support, plus optional DWG pair diagnostics and later image previews.
 
 ## Accepted DWG rules
 
@@ -59,3 +60,13 @@ The accepted state at the end of 2026-08-12:
 - Pairing must normalize project codes, separators, Cyrillic text, and service prefixes.
 - Pairing must prefer missing a doubtful pair over connecting files from different sections.
 - Explicit `Часть 1` / `Часть 2`, `узел`, and `сечение` conflicts must not be paired.
+
+## Accepted Vortex Word rules
+
+- Use the name `Вортекс` / `Vortex` for the universal preview module.
+- Do not build a custom Word viewer.
+- Preview `.doc` and `.docx` by converting through Microsoft Word to PDF cache, then use the accepted PDF render pipeline.
+- Keep native opening available as `Открыть Word`.
+- Treat `.gdoc` as a Google Docs shortcut, not as a local Word document.
+- `.gdoc` must be visible in filters/tree and openable, but it should show a no-local-preview placeholder instead of being sent through Microsoft Word.
+- Next Vortex target is Excel: `.xls` / `.xlsx`.

@@ -105,11 +105,18 @@ Candidate strategies:
 - external converters;
 - hybrid preview cache plus native open.
 
-Status: next major implementation phase.
+Status:
+
+- Word/DOC/DOCX/GDOC: functioning and accepted for current stage.
+- Excel/XLS/XLSX: next major implementation phase.
+
+Accepted Word checkpoint:
+
+- `docs/CHECKPOINT_2026-08-12_VORTEX_WORD_ACCEPTED.md`
 
 First step:
 
-- investigate Word and Excel preview strategies on local Windows;
+- investigate Excel preview strategy on local Windows;
 - keep the accepted PDF and DWG flows untouched;
 - choose the fastest reliable path for preview generation.
 

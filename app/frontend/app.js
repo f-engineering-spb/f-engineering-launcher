@@ -660,7 +660,7 @@ function renderTreeNode(node, parent) {
 function renderFormats() {
   els.formatStrip.replaceChildren();
   const extensions = state.currentManifest?.statistics?.extensions || {};
-  const preferred = ["PDF", "DWG", "XLSX", "XLS", "DOCX", "DOC", "TXT", "PNG", "JPG", "JPEG", "PPTX", "SVG"];
+  const preferred = ["PDF", "DWG", "XLSX", "XLS", "DOCX", "DOC", "GDOC", "TXT", "PNG", "JPG", "JPEG", "PPTX", "SVG"];
   const all = Object.keys(extensions).sort((a, b) => a.localeCompare(b, "ru"));
   const formats = [...new Set([...preferred.filter((ext) => ext in extensions), ...all])];
   if (!formats.length) {
@@ -738,18 +738,42 @@ async function openSelectedObject() {
   finishProgress("Структура открыта");
 }
 
-function collectPreviewPdfFilesForDisplay() {
+function collectPreviewFilesForDisplay() {
   if (!state.currentManifest?.tree) return [];
   const allNodes = flattenTree(state.currentManifest.tree, []);
   const selectedNodes = allNodes.filter((node) => state.selectedPaths.has(node.path));
   const pdfIndex = buildPdfPairIndex(allNodes);
   const result = [];
   const directPdfPaths = new Set();
+  const directSourcePaths = new Set();
 
-  function addPreviewPdf(node) {
+  function addPreviewFile(node) {
     if (node.type === "file" && node.extension === "PDF" && !directPdfPaths.has(node.path)) {
       directPdfPaths.add(node.path);
       result.push(node);
+    }
+    if (node.type === "file" && ["DOC", "DOCX"].includes(node.extension) && !directSourcePaths.has(node.path)) {
+      directSourcePaths.add(node.path);
+      result.push({
+        ...node,
+        previewType: "WORD",
+        previewFor: {
+          type: node.extension,
+          name: node.name,
+          path: node.path,
+        },
+      });
+    }
+    if (node.type === "file" && node.extension === "GDOC" && !directSourcePaths.has(node.path)) {
+      directSourcePaths.add(node.path);
+      result.push({
+        type: "missing-preview",
+        name: node.name,
+        documentPath: node.path,
+        sourcePath: node.path,
+        sourceType: "GDOC",
+        message: "Google Docs: локального Word-preview нет. Откройте документ в браузере.",
+      });
     }
     if (node.type === "file" && node.extension === "DWG") {
       const pair = findPdfPairForDwg(node, pdfIndex);
@@ -778,11 +802,11 @@ function collectPreviewPdfFilesForDisplay() {
 
   if (selectedNodes.length) {
     selectedNodes.forEach((node) => {
-      if (node.type === "file") addPreviewPdf(node);
+      if (node.type === "file") addPreviewFile(node);
       if (node.type === "folder") {
         allNodes
           .filter((candidate) => candidate.path !== node.path && candidate.path.startsWith(node.path))
-          .forEach(addPreviewPdf);
+          .forEach(addPreviewFile);
       }
     });
   }
@@ -864,7 +888,11 @@ function setQualityBadge(textValue, mode = "") {
 function setActiveNativePath(path) {
   state.activeNativePath = path || "";
   els.openNativeFile.hidden = !state.activeNativePath;
-  els.openNativeFile.textContent = state.activeNativePath.toLocaleLowerCase("ru").endsWith(".dwg") ? "Открыть DWG" : "Открыть";
+  const lowerPath = state.activeNativePath.toLocaleLowerCase("ru");
+  if (lowerPath.endsWith(".dwg")) els.openNativeFile.textContent = "Открыть DWG";
+  else if (lowerPath.endsWith(".doc") || lowerPath.endsWith(".docx")) els.openNativeFile.textContent = "Открыть Word";
+  else if (lowerPath.endsWith(".gdoc")) els.openNativeFile.textContent = "Открыть Google Docs";
+  else els.openNativeFile.textContent = "Открыть";
 }
 
 async function openActiveNativeFile() {
@@ -894,10 +922,12 @@ async function requestHighQualityPage(page) {
     setQualityBadge(`Качество ${PDF_QUALITY_DPI} DPI загружается…`, "loading");
   }
   try {
-    const response = await fetch("/api/pdf/page", {
+    const endpoint = page.previewType === "WORD" ? "/api/word/page" : "/api/pdf/page";
+    const sourceFile = page.previewType === "WORD" ? page.previewFor?.path : page.documentPath;
+    const response = await fetch(endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ file: page.documentPath, page: page.page, dpi: PDF_QUALITY_DPI }),
+      body: JSON.stringify({ file: sourceFile, page: page.page, dpi: PDF_QUALITY_DPI }),
     });
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || "PDF page render failed");
@@ -1017,9 +1047,9 @@ const PDF_PREVIEW_DPI = 150;
 const PDF_QUALITY_DPI = 300;
 
 async function renderSelectedPdfFiles() {
-  const previewItems = collectPreviewPdfFilesForDisplay();
+  const previewItems = collectPreviewFilesForDisplay();
   if (!previewItems.length) {
-    startProgress("Превью не найдено", "Выберите PDF или DWG.");
+    startProgress("Превью не найдено", "Выберите PDF, DWG или Word.");
     finishProgress("Превью не найдено");
     return;
   }
@@ -1054,7 +1084,8 @@ async function renderSelectedPdfFiles() {
       controller = new AbortController();
       state.operationControllers.push(controller);
       const timeoutId = setTimeout(() => controller.abort(), PDF_FETCH_TIMEOUT_MS);
-      const response = await fetch("/api/pdf/render", {
+      const endpoint = batch[0]?.previewType === "WORD" ? "/api/word/render" : "/api/pdf/render";
+      const response = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ files: batch.map((file) => file.path), dpi: PDF_PREVIEW_DPI }),
@@ -1080,6 +1111,7 @@ async function renderSelectedPdfFiles() {
             dpi: payload.dpi,
             cacheHit: document.cacheHit,
             previewFor: batch[0]?.previewFor || null,
+            previewType: batch[0]?.previewType || "",
           })),
         );
       }
