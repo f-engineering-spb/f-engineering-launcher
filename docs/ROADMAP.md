@@ -77,7 +77,17 @@ Desired behaviour:
 - show an action such as `Open in DWG Viewer` / native DWG application;
 - open the DWG in the native application when needed.
 
-Status: next implementation phase after the accepted PDF/UI checkpoint.
+Status: functioning and accepted for current stage.
+
+Accepted checkpoint:
+
+- `docs/CHECKPOINT_2026-08-12_DWG_ACCEPTED.md`
+
+Remaining optional improvements:
+
+- diagnostics screen for found/suspicious/missing DWG/PDF pairs;
+- manual override for rare incorrect pairs;
+- per-object pairing report.
 
 ## Phase 6 - Word and Excel previews
 
@@ -94,6 +104,14 @@ Candidate strategies:
 - Windows shell thumbnails;
 - external converters;
 - hybrid preview cache plus native open.
+
+Status: next major implementation phase.
+
+First step:
+
+- investigate Word and Excel preview strategies on local Windows;
+- keep the accepted PDF and DWG flows untouched;
+- choose the fastest reliable path for preview generation.
 
 ## Phase 7 - Modules
 

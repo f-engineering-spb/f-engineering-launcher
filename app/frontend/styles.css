@@ -315,6 +315,20 @@ textarea {
   font-size: 10.75px;
 }
 
+.pair-badge {
+  display: inline-block;
+  margin-left: 3px;
+  color: #4b6f8f;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
+  vertical-align: baseline;
+}
+
+.pair-badge:empty {
+  display: none;
+}
+
 .copy-path-button {
   position: absolute;
   top: 50%;
@@ -467,6 +481,17 @@ textarea {
   user-select: none;
 }
 
+.missing-preview-card {
+  display: grid;
+  min-height: 120px;
+  place-items: center;
+  border: 1px dashed rgba(102, 127, 153, .65);
+  border-radius: 5px;
+  background: rgba(251, 252, 253, .52);
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .pdf-thumb span {
   display: block;
   margin-top: 5px;
@@ -541,6 +566,18 @@ textarea {
   border-radius: 5px;
   font-size: 12px;
   font-weight: 500;
+}
+
+.hand-icon {
+  display: block;
+  width: 18px;
+  height: 18px;
+  margin: auto;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .viewer-controls button.active {

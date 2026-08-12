@@ -14,7 +14,9 @@ const state = {
   renderedPages: [],
   activePageUrl: "",
   activePageKey: "",
+  activeNativePath: "",
   highQualityPages: new Map(),
+  pdfPairIndex: new Map(),
   viewMode: "standard",
   view: {
     scale: 1,
@@ -65,6 +67,7 @@ const els = {
   viewFit: document.getElementById("viewFit"),
   viewRotate: document.getElementById("viewRotate"),
   viewPanMode: document.getElementById("viewPanMode"),
+  openNativeFile: document.getElementById("openNativeFile"),
   viewStandardMode: document.getElementById("viewStandardMode"),
   viewMediumMode: document.getElementById("viewMediumMode"),
   viewFullMode: document.getElementById("viewFullMode"),
@@ -283,6 +286,247 @@ function flattenTree(node, result = []) {
   return result;
 }
 
+function fileStem(name = "") {
+  const value = String(name);
+  const dotIndex = value.lastIndexOf(".");
+  return dotIndex > 0 ? value.slice(0, dotIndex) : value;
+}
+
+function normalizePairName(name = "") {
+  return fileStem(name)
+    .toLocaleLowerCase("ru")
+    .replace(/ё/g, "е")
+    .replace(/\b(?:ap|ar)\s*(?=\d)/g, "ар")
+    .replace(/ар\s*(?=\d)/g, "ар ")
+    .replace(/проеомв/g, "проемов")
+    .replace(/срп\s*[_-]?\s*7/g, " ")
+    .replace(/лист/g, " ")
+    .replace(/[+]/g, " ")
+    .replace(/[_\-.()[\]{},]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function pairTokens(name = "") {
+  return normalizePairName(name)
+    .split(" ")
+    .map((token) => token.trim())
+    .filter((token) => token.length > 1)
+    .filter((token) => !["срп", "для", "всех", "отм", "осях", "оси", "на"].includes(token));
+}
+
+function escapeRegExp(value = "") {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function extractCodeParts(normalized = "") {
+  const codeMatch = normalized.match(/(?:^|\s)ар\s*(\d)\s+(\d)\s+(\d)(?=\s|$)/u)
+    || normalized.match(/(?:^|\s)ар\s*(\d)\s+(\d)(?=\s|$)/u);
+  return codeMatch ? codeMatch.slice(1).filter(Boolean) : [];
+}
+
+function stripPairServiceNoise(normalized = "") {
+  let value = normalized
+    .replace(/\bсрп\s*7\b/g, " ")
+    .replace(/\bлист\b/g, " ");
+  const codeParts = extractCodeParts(value);
+  if (codeParts.length) {
+    const codePattern = new RegExp(`(?:^|\\s)ар\\s*${codeParts.map(escapeRegExp).join("\\s+")}(?=\\s|$)`, "g");
+    value = value.replace(codePattern, " ");
+  }
+  return value
+    .replace(/\b50\s+\d{1,3}\b/g, " ")
+    .replace(/^\s*\d{1,3}\s+/, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function stemPairToken(token = "") {
+  if (token.length <= 4) return token;
+  return token.replace(/(иями|ями|ами|ого|его|ому|ему|ыми|ими|ых|их|ая|яя|ое|ее|ые|ие|ый|ий|ой|ую|юю|ом|ем|ах|ях|ов|ев|ей|ам|ям|а|я|ы|и|е|у|ю|о)$/u, "");
+}
+
+function semanticPairTokens(normalized = "") {
+  return stripPairServiceNoise(normalized)
+    .split(" ")
+    .map((token) => stemPairToken(token.trim()))
+    .filter((token) => token.length > 1)
+    .filter((token) => !["срп", "для", "всех", "отм", "осях", "оси", "на"].includes(token));
+}
+
+function tokenBigrams(tokens = []) {
+  const result = new Set();
+  for (let index = 0; index < tokens.length - 1; index += 1) {
+    result.add(`${tokens[index]} ${tokens[index + 1]}`);
+  }
+  return result;
+}
+
+function longestCommonTokenRun(left = [], right = []) {
+  let best = 0;
+  const previous = new Array(right.length + 1).fill(0);
+  const current = new Array(right.length + 1).fill(0);
+  for (let leftIndex = 1; leftIndex <= left.length; leftIndex += 1) {
+    for (let rightIndex = 1; rightIndex <= right.length; rightIndex += 1) {
+      current[rightIndex] = left[leftIndex - 1] === right[rightIndex - 1] ? previous[rightIndex - 1] + 1 : 0;
+      if (current[rightIndex] > best) best = current[rightIndex];
+    }
+    previous.splice(0, previous.length, ...current);
+    current.fill(0);
+  }
+  return best;
+}
+
+function longestCommonSubstringLength(left = "", right = "") {
+  if (!left || !right) return 0;
+  let best = 0;
+  const previous = new Array(right.length + 1).fill(0);
+  const current = new Array(right.length + 1).fill(0);
+  for (let leftIndex = 1; leftIndex <= left.length; leftIndex += 1) {
+    for (let rightIndex = 1; rightIndex <= right.length; rightIndex += 1) {
+      current[rightIndex] = left[leftIndex - 1] === right[rightIndex - 1] ? previous[rightIndex - 1] + 1 : 0;
+      if (current[rightIndex] > best) best = current[rightIndex];
+    }
+    previous.splice(0, previous.length, ...current);
+    current.fill(0);
+  }
+  return best;
+}
+
+function pairFingerprint(name = "") {
+  const normalized = normalizePairName(name);
+  const codeParts = extractCodeParts(normalized);
+  const code = codeParts.length ? `ар${codeParts.join(".")}` : "";
+  const sheetMatch = normalized.match(/\b50\s+(\d{1,3})\b/);
+  const sheet = sheetMatch ? String(Number(sheetMatch[1])) : "";
+  const codeNumberPattern = codeParts.length
+    ? new RegExp(`(?:^|\\s)ар\\s*${codeParts.join("\\s+")}\\s+(\\d{1,3})(?=\\s|$)`, "u")
+    : /(?:^|\s)ар\s*(?:\d\s*)+\s+(\d{1,3})(?=\s|$)/u;
+  const codeNumberMatch = normalized.match(codeNumberPattern);
+  const codeNumber = codeNumberMatch ? String(Number(codeNumberMatch[1])) : "";
+  const detailMatches = [...normalized.matchAll(/(?:^|\s)(узел|сечение|часть)\s+([a-zа-я0-9]+(?:\s*[-–]\s*[a-zа-я0-9]+)?)(?=\s|$)/gu)]
+    .map((match) => `${match[1]} ${match[2].replace(/\s+/g, "")}`);
+  const details = new Set(detailMatches);
+  const floorMatch = normalized.match(/\b(\d+\s*[-–]\s*\d+|\d+)\s+(?:го\s+)?этаж/u);
+  const floor = floorMatch ? floorMatch[1].replace(/\s+/g, "") : "";
+  const technical = /техническ|тех\s*пространств/u.test(normalized);
+  const types = new Set();
+  if (/маркировочный\s+план/u.test(normalized)) types.add("маркировочный план");
+  if (/общие\s+данные/u.test(normalized)) types.add("общие данные");
+  if (/ведомост/u.test(normalized) && /отделк/u.test(normalized)) types.add("ведомость отделки");
+  if (/экспликац/u.test(normalized) && /полов/u.test(normalized)) types.add("экспликация полов");
+  if (/схем/u.test(normalized) && /двер/u.test(normalized)) types.add("схемы дверей");
+  if (/колористическ/u.test(normalized)) types.add("колористическое решение");
+  if (/фасад/u.test(normalized)) types.add("фасад");
+  const axisTokens = new Set([...normalized.matchAll(/\b7\s+2\s+[0-9а-я]+\b/gu)].map((match) => match[0].replace(/\s+/g, ".")));
+  const tokens = new Set(pairTokens(name));
+  const semanticText = stripPairServiceNoise(normalized);
+  const semanticTokensList = semanticPairTokens(normalized);
+  const semanticTokensSet = new Set(semanticTokensList);
+  return {
+    normalizedName: normalized,
+    semanticText,
+    semanticTokensList,
+    semanticTokensSet,
+    semanticBigrams: tokenBigrams(semanticTokensList),
+    code,
+    sheet: sheet || codeNumber,
+    details,
+    floor,
+    technical,
+    types,
+    axisTokens,
+    tokens,
+  };
+}
+
+function buildPdfPairIndex(nodes) {
+  return nodes
+    .filter((node) => node.type === "file" && node.extension === "PDF")
+    .map((node) => ({
+      node,
+      fingerprint: pairFingerprint(node.name),
+    }));
+}
+
+function intersectionSize(left, right) {
+  let count = 0;
+  for (const item of left) {
+    if (right.has(item)) count += 1;
+  }
+  return count;
+}
+
+function comparePairFingerprints(dwg, pdf) {
+  if (dwg.normalizedName === pdf.normalizedName) return { score: 100, confidence: "exact" };
+  if (dwg.code && pdf.code && dwg.code !== pdf.code) return null;
+  const detailOverlap = intersectionSize(dwg.details, pdf.details);
+  if (dwg.details.size && pdf.details.size && detailOverlap === 0) return null;
+
+  let score = 0;
+  if (dwg.code && pdf.code && dwg.code === pdf.code) score += 32;
+  if (dwg.sheet && pdf.sheet && dwg.sheet === pdf.sheet) score += 8;
+  if (dwg.sheet && pdf.sheet && dwg.sheet !== pdf.sheet) score -= 4;
+  if (detailOverlap) score += 34;
+  if (dwg.floor && pdf.floor && dwg.floor === pdf.floor) score += 28;
+  if (dwg.technical && pdf.technical) score += 28;
+
+  const typeOverlap = intersectionSize(dwg.types, pdf.types);
+  score += typeOverlap * 16;
+
+  const axisOverlap = intersectionSize(dwg.axisTokens, pdf.axisTokens);
+  score += Math.min(18, axisOverlap * 6);
+
+  const sharedTokens = intersectionSize(dwg.tokens, pdf.tokens);
+  const tokenRatio = sharedTokens / Math.max(dwg.tokens.size, pdf.tokens.size, 1);
+  score += Math.round(tokenRatio * 28);
+
+  const semanticOverlap = intersectionSize(dwg.semanticTokensSet, pdf.semanticTokensSet);
+  const semanticRatio = semanticOverlap / Math.max(dwg.semanticTokensSet.size, pdf.semanticTokensSet.size, 1);
+  score += Math.round(semanticRatio * 46);
+
+  const bigramOverlap = intersectionSize(dwg.semanticBigrams, pdf.semanticBigrams);
+  score += Math.min(36, bigramOverlap * 12);
+
+  const commonRun = longestCommonTokenRun(dwg.semanticTokensList, pdf.semanticTokensList);
+  if (commonRun >= 5) score += 42;
+  else if (commonRun >= 4) score += 32;
+  else if (commonRun >= 3) score += 22;
+
+  const commonSubstring = longestCommonSubstringLength(dwg.semanticText, pdf.semanticText);
+  if (commonSubstring >= 32) score += 32;
+  else if (commonSubstring >= 22) score += 22;
+  else if (commonSubstring >= 16) score += 12;
+
+  if (dwg.semanticText && pdf.semanticText && dwg.semanticText === pdf.semanticText) score += 52;
+
+  const hasSemanticAnchor = Boolean(
+    detailOverlap
+    || (dwg.floor && pdf.floor && dwg.floor === pdf.floor)
+    || (dwg.technical && pdf.technical)
+    || typeOverlap >= 1
+    || axisOverlap >= 2
+    || semanticRatio >= 0.5
+    || bigramOverlap >= 1
+    || commonRun >= 3
+    || commonSubstring >= 22
+  );
+  if (!hasSemanticAnchor && score < 82) return null;
+  if (score < 68) return null;
+  return { score, confidence: score >= 78 ? "strong" : "probable" };
+}
+
+function findPdfPairForDwg(dwgNode, pdfIndex) {
+  if (!dwgNode || dwgNode.extension !== "DWG") return null;
+  const dwgFingerprint = pairFingerprint(dwgNode.name);
+  let best = null;
+  for (const candidate of pdfIndex) {
+    const comparison = comparePairFingerprints(dwgFingerprint, candidate.fingerprint);
+    if (comparison && (!best || comparison.score > best.score)) best = { node: candidate.node, ...comparison };
+  }
+  return best;
+}
+
 function nodeMatches(node) {
   const query = els.treeSearch.value.trim().toLocaleLowerCase("ru");
   const filter = state.activeFilter;
@@ -302,7 +546,10 @@ function updateSelectionSummary() {
   const selectedNodes = state.visibleRows.filter((item) => state.selectedPaths.has(item.path));
   const files = selectedNodes.filter((item) => item.type === "file").length;
   const folders = selectedNodes.filter((item) => item.type === "folder").length;
-  els.selectionSummary.textContent = `Выбрано: ${selected.length} · файлов: ${files} · папок: ${folders}`;
+  const dwgFiles = selectedNodes.filter((item) => item.type === "file" && item.extension === "DWG");
+  const dwgWithPdf = dwgFiles.filter((item) => findPdfPairForDwg(item, state.pdfPairIndex)).length;
+  const dwgText = dwgFiles.length ? ` · DWG с PDF: ${dwgWithPdf}/${dwgFiles.length}` : "";
+  els.selectionSummary.textContent = `Выбрано: ${selected.length} · файлов: ${files} · папок: ${folders}${dwgText}`;
 }
 
 function selectNode(node, event) {
@@ -364,7 +611,17 @@ function renderTreeNode(node, parent) {
   nameEl.textContent = node.name;
   const metaEl = document.createElement("span");
   metaEl.className = "tree-meta";
-  metaEl.textContent = node.type === "file" ? node.extension : (node.children || []).length;
+  metaEl.textContent = node.type === "file" ? "" : (node.children || []).length;
+  if (node.type === "file" && node.extension === "DWG") {
+    const pdfPair = findPdfPairForDwg(node, state.pdfPairIndex);
+    if (pdfPair) {
+      const pairBadge = document.createElement("span");
+      pairBadge.className = "pair-badge";
+      pairBadge.textContent = "↔";
+      pairBadge.title = `Связан с PDF-превью: ${pdfPair.node.name}${pdfPair.confidence === "probable" ? " (вероятная пара)" : ""}`;
+      nameEl.append(" ", pairBadge);
+    }
+  }
   const copyButton = document.createElement("button");
   copyButton.type = "button";
   copyButton.className = "copy-path-button";
@@ -450,6 +707,7 @@ function renderTree() {
     updateSelectionSummary();
     return;
   }
+  state.pdfPairIndex = buildPdfPairIndex(flattenTree(state.currentManifest.tree, []));
   renderTreeNode(state.currentManifest.tree, els.objectTree);
   if (!state.visibleRows.length) {
     const empty = document.createElement("div");
@@ -480,28 +738,56 @@ async function openSelectedObject() {
   finishProgress("Структура открыта");
 }
 
-function collectPdfFilesForDisplay() {
+function collectPreviewPdfFilesForDisplay() {
   if (!state.currentManifest?.tree) return [];
   const allNodes = flattenTree(state.currentManifest.tree, []);
   const selectedNodes = allNodes.filter((node) => state.selectedPaths.has(node.path));
-  const result = new Map();
+  const pdfIndex = buildPdfPairIndex(allNodes);
+  const result = [];
+  const directPdfPaths = new Set();
 
-  function addPdf(node) {
-    if (node.type === "file" && node.extension === "PDF") result.set(node.path, node);
+  function addPreviewPdf(node) {
+    if (node.type === "file" && node.extension === "PDF" && !directPdfPaths.has(node.path)) {
+      directPdfPaths.add(node.path);
+      result.push(node);
+    }
+    if (node.type === "file" && node.extension === "DWG") {
+      const pair = findPdfPairForDwg(node, pdfIndex);
+      if (pair) {
+        result.push({
+          ...pair.node,
+          previewFor: {
+            type: "DWG",
+            name: node.name,
+            path: node.path,
+            confidence: pair.confidence,
+          },
+        });
+      } else {
+        result.push({
+          type: "missing-preview",
+          name: node.name,
+          documentPath: node.path,
+          sourcePath: node.path,
+          sourceType: "DWG",
+          message: "PDF-пара не найдена",
+        });
+      }
+    }
   }
 
   if (selectedNodes.length) {
     selectedNodes.forEach((node) => {
-      if (node.type === "file") addPdf(node);
+      if (node.type === "file") addPreviewPdf(node);
       if (node.type === "folder") {
         allNodes
           .filter((candidate) => candidate.path !== node.path && candidate.path.startsWith(node.path))
-          .forEach(addPdf);
+          .forEach(addPreviewPdf);
       }
     });
   }
 
-  return [...result.values()];
+  return result;
 }
 
 function renderPdfViewer(pages) {
@@ -524,17 +810,26 @@ function renderPdfViewer(pages) {
     const thumb = document.createElement("button");
     thumb.type = "button";
     thumb.className = "pdf-thumb";
+    thumb.classList.toggle("missing-preview", page.type === "missing-preview");
     thumb.dataset.pageKey = key;
     thumb.classList.toggle("active", key === state.activePageKey);
     thumb.title = page.name;
 
-    const img = document.createElement("img");
-    img.src = page.url;
-    img.alt = page.name;
-    img.draggable = false;
+    if (page.type === "missing-preview") {
+      const missing = document.createElement("div");
+      missing.className = "missing-preview-card";
+      missing.textContent = "Нет PDF-пары";
+      thumb.append(missing);
+    } else {
+      const img = document.createElement("img");
+      img.src = page.url;
+      img.alt = page.name;
+      img.draggable = false;
+      thumb.append(img);
+    }
     const label = document.createElement("span");
     label.textContent = page.name;
-    thumb.append(img, label);
+    thumb.append(label);
     thumb.addEventListener("click", () => showPdfPage(page));
     els.pdfThumbs.append(thumb);
   });
@@ -549,6 +844,7 @@ function renderPdfViewer(pages) {
 }
 
 function pageKey(page) {
+  if (page.type === "missing-preview") return `missing|${page.sourcePath || page.documentPath || page.name}`;
   return `${page.documentPath || ""}|${page.page || ""}`;
 }
 
@@ -563,6 +859,23 @@ function setQualityBadge(textValue, mode = "") {
   els.qualityBadge.textContent = textValue || "";
   els.qualityBadge.classList.toggle("loading", mode === "loading");
   els.qualityBadge.classList.toggle("ready", mode === "ready");
+}
+
+function setActiveNativePath(path) {
+  state.activeNativePath = path || "";
+  els.openNativeFile.hidden = !state.activeNativePath;
+  els.openNativeFile.textContent = state.activeNativePath.toLocaleLowerCase("ru").endsWith(".dwg") ? "Открыть DWG" : "Открыть";
+}
+
+async function openActiveNativeFile() {
+  if (!state.activeNativePath) return;
+  const response = await fetch("/api/open-file", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path: state.activeNativePath }),
+  });
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload.error || "Файл не открыт");
 }
 
 async function requestHighQualityPage(page) {
@@ -611,9 +924,23 @@ async function requestHighQualityPage(page) {
 
 function showPdfPage(page) {
   const key = pageKey(page);
+  state.activePageKey = key;
+  if (page.type === "missing-preview") {
+    state.activePageUrl = "";
+    setActiveNativePath(page.sourcePath || page.documentPath);
+    els.pdfPageImage.hidden = true;
+    els.pdfPageImage.removeAttribute("src");
+    els.viewerEmpty.hidden = false;
+    els.viewerEmpty.innerHTML = `<strong>${text(page.name)}</strong><br>${text(page.message || "PDF-пара не найдена")}`;
+    els.pdfViewer.classList.remove("empty");
+    els.viewerControls.hidden = false;
+    setQualityBadge("Нет PDF-пары");
+    updateActivePdfThumb();
+    return;
+  }
   const highPage = state.highQualityPages.get(key);
   const displayPage = highPage || page;
-  state.activePageKey = key;
+  setActiveNativePath(page.previewFor?.path || "");
   state.activePageUrl = displayPage.url;
   els.pdfPageImage.src = displayPage.url;
   els.pdfPageImage.hidden = false;
@@ -690,36 +1017,38 @@ const PDF_PREVIEW_DPI = 150;
 const PDF_QUALITY_DPI = 300;
 
 async function renderSelectedPdfFiles() {
-  const pdfFiles = collectPdfFilesForDisplay();
-  if (!pdfFiles.length) {
-    startProgress("PDF не выбран", "Выберите PDF-файл, папку с PDF или включите фильтр PDF.");
-    finishProgress("PDF не выбран");
+  const previewItems = collectPreviewPdfFilesForDisplay();
+  if (!previewItems.length) {
+    startProgress("Превью не найдено", "Выберите PDF или DWG.");
+    finishProgress("Превью не найдено");
     return;
   }
 
   setTreeBrowseMode(false);
   setViewerMode("standard");
 
-  const batches = chunkItems(pdfFiles, 1);
-  const pageGroups = Array.from({ length: batches.length }, () => []);
+  const batches = chunkItems(previewItems, 1);
+  const pageGroups = batches.map((batch) => (batch[0]?.type === "missing-preview" ? [batch[0]] : []));
+  const renderableBatchCount = batches.filter((batch) => batch[0]?.type !== "missing-preview").length;
   const allErrors = [];
   let totalPages = 0;
   let renderedPages = 0;
   let nextBatchIndex = 0;
-  let completedBatches = 0;
+  let completedBatches = batches.length - renderableBatchCount;
 
-  startProgress("Рендер PDF", `${pdfFiles.length} PDF · быстрый обзор ${PDF_PREVIEW_DPI} DPI · качество ${PDF_QUALITY_DPI} DPI по клику`);
+  startProgress("Рендер превью", `${previewItems.length} элементов · быстрый обзор ${PDF_PREVIEW_DPI} DPI · качество ${PDF_QUALITY_DPI} DPI по клику`);
 
   function refreshRenderProgress() {
     const percent = Math.min(99, Math.round((completedBatches / batches.length) * 100));
     els.progressValue.textContent = `${percent}%`;
     els.progressFill.style.width = `${percent}%`;
-    els.progressDetail.textContent = `${pdfFiles.length} PDF · готово ${completedBatches} из ${batches.length} · стр. ${renderedPages}`;
+    els.progressDetail.textContent = `${previewItems.length} элементов · готово ${completedBatches} из ${batches.length} · стр. ${renderedPages}`;
     renderPdfViewer(pageGroups.flat());
   }
 
   async function renderBatch(batchIndex) {
     const batch = batches[batchIndex];
+    if (batch[0]?.type === "missing-preview") return;
     let controller = null;
     try {
       controller = new AbortController();
@@ -746,10 +1075,11 @@ async function renderSelectedPdfFiles() {
         pageGroups[batchIndex] = payload.documents.flatMap((document) =>
           document.items.map((page) => ({
             ...page,
-            name: `${document.name} · стр. ${page.page}`,
+            name: `${batch[0]?.previewFor ? batch[0].previewFor.name : document.name} · стр. ${page.page}`,
             documentPath: document.path,
             dpi: payload.dpi,
             cacheHit: document.cacheHit,
+            previewFor: batch[0]?.previewFor || null,
           })),
         );
       }
@@ -784,14 +1114,15 @@ async function renderSelectedPdfFiles() {
     }
   }
 
-  const workerCount = Math.min(PDF_RENDER_CONCURRENCY, batches.length);
+  refreshRenderProgress();
+  const workerCount = Math.min(PDF_RENDER_CONCURRENCY, renderableBatchCount);
   await Promise.all(Array.from({ length: workerCount }, () => worker()));
   if (state.progressCancelled) return;
 
   const errorCount = allErrors.length;
   const detail = errorCount
     ? `Показано: ${renderedPages} из ${totalPages} стр. · ошибок: ${errorCount}`
-    : `Готово: ${totalPages} стр. · ${pdfFiles.length} PDF · обзор ${PDF_PREVIEW_DPI} DPI`;
+    : `Готово: ${totalPages} стр. · ${previewItems.length} элементов · обзор ${PDF_PREVIEW_DPI} DPI`;
   finishProgress(detail);
   if (errorCount) {
     console.warn("PDF render partial errors", allErrors);
@@ -830,6 +1161,9 @@ els.viewRotate.addEventListener("click", () => {
 els.viewPanMode.addEventListener("click", () => {
   state.view.panMode = !state.view.panMode;
   updateViewTransform();
+});
+els.openNativeFile.addEventListener("click", () => {
+  openActiveNativeFile().catch(showOperationError);
 });
 els.viewStandardMode.addEventListener("click", () => setViewerMode("standard"));
 els.viewMediumMode.addEventListener("click", () => setViewerMode("medium"));

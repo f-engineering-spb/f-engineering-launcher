@@ -38,3 +38,37 @@ For non-PDF formats the goal is preview, navigation, matching, and quick opening
 - Word should ideally expose page previews;
 - Excel should ideally expose sheet/tab previews;
 - native applications remain the place for full editing.
+
+## 2026-08-12 - DWG uses PDF preview plus native open
+
+DWG is not rendered as a native CAD canvas inside Launcher.
+
+Decision:
+
+- use the matching PDF as the visual preview for a DWG file;
+- open the original DWG through Windows default application when the user asks;
+- keep DWG files without PDF pairs visible and selectable;
+- show a `Нет PDF-пары` placeholder for DWG files without a preview.
+
+Reason:
+
+- DWG viewers differ by workstation;
+- AutoCAD/ZWCAD/DWG TrueView are better native tools for actual DWG inspection;
+- Launcher's job is fast navigation, preview, and selection.
+
+## 2026-08-12 - DWG/PDF matching must be semantic, not only numeric
+
+DWG/PDF file names are not always one-to-one by sheet number.
+
+Decision:
+
+- normalize project codes such as `АР2-2-2` and `АР2.2.2`;
+- compare cleaned meaningful tails of file names;
+- use long phrase and token-sequence similarity;
+- keep strict guards against different sections and different explicit parts.
+
+Reason:
+
+- real project files can differ by sheet number while clearly describing the same drawing;
+- false negatives are common with numeric-only matching;
+- false positives across different sections are more dangerous than missing a rare pair.

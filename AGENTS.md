@@ -46,4 +46,16 @@ The accepted state at the end of 2026-08-12:
 - wide tree browsing for long file names works;
 - PDF overview/quality split works;
 - viewer quality indicator works;
-- next direction is design polish and universal preview support for DWG, Word, Excel, and images.
+- DWG/PDF pairing works and is accepted for the current stage;
+- DWG opens through the Windows native/default application;
+- next direction is universal preview support for Word, Excel, and images, plus optional DWG pair diagnostics.
+
+## Accepted DWG rules
+
+- Do not build a custom CAD viewer inside Launcher v3 at this stage.
+- Use PDF pairs as visual previews for DWG.
+- Keep DWG files without PDF pairs visible; show a clear empty preview state instead of hiding them.
+- Open DWG files through Windows default application from Launcher.
+- Pairing must normalize project codes, separators, Cyrillic text, and service prefixes.
+- Pairing must prefer missing a doubtful pair over connecting files from different sections.
+- Explicit `Часть 1` / `Часть 2`, `узел`, and `сечение` conflicts must not be paired.

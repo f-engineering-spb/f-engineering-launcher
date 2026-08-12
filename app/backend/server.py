@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import mimetypes
+import os
 import shutil
 import subprocess
 import time
@@ -613,6 +614,24 @@ class LauncherHandler(BaseHTTPRequestHandler):
                     raise ValueError("Не выбран PDF-файл для отображения")
                 self.send_json(HTTPStatus.OK, render_pdf_page(Path(raw_file), page=page, dpi=dpi))
             except (ValueError, FileNotFoundError, RuntimeError, OSError, subprocess.TimeoutExpired, json.JSONDecodeError) as error:
+                self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
+            return
+
+        if parsed.path == "/api/open-file":
+            try:
+                body = self.read_json()
+                raw_file = str(body.get("path", "")).strip()
+                if not raw_file:
+                    raise ValueError("Не выбран файл для открытия")
+                target = Path(raw_file).expanduser()
+                if not target.exists() or not target.is_file():
+                    raise FileNotFoundError(f"Файл не найден: {target}")
+                if os.name == "nt":
+                    os.startfile(str(target))  # type: ignore[attr-defined]
+                else:
+                    subprocess.Popen(["xdg-open", str(target)])
+                self.send_json(HTTPStatus.OK, {"ok": True, "path": str(target)})
+            except (ValueError, FileNotFoundError, OSError, json.JSONDecodeError) as error:
                 self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
             return
 
