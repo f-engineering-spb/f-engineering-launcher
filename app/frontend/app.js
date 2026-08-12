@@ -38,7 +38,6 @@ const els = {
   display: document.getElementById("displayObject"),
   exclude: document.getElementById("excludeObject"),
   cancel: document.getElementById("cancelOperation"),
-  path: document.getElementById("objectPath"),
   progressPanel: document.getElementById("progressPanel"),
   progressLabel: document.getElementById("progressLabel"),
   progressValue: document.getElementById("progressValue"),
@@ -49,11 +48,13 @@ const els = {
   objectList: document.getElementById("objectList"),
   objectStats: document.getElementById("objectStats"),
   backToObjects: document.getElementById("backToObjects"),
+  backToTree: document.getElementById("backToTree"),
   treeSearch: document.getElementById("treeSearch"),
   formatStrip: document.getElementById("formatStrip"),
   selectionSummary: document.getElementById("selectionSummary"),
   objectTree: document.getElementById("objectTree"),
   pdfThumbs: document.getElementById("pdfThumbs"),
+  pdfViewer: document.getElementById("pdfViewer"),
   pdfStage: document.getElementById("pdfStage"),
   pdfPageImage: document.getElementById("pdfPageImage"),
   viewerEmpty: document.getElementById("viewerEmpty"),
@@ -90,11 +91,13 @@ function setMode(mode) {
   els.objectListState.classList.toggle("active", mode === "objects");
   els.treeState.classList.toggle("active", mode === "tree");
   els.shell.classList.toggle("tree-browse", false);
+  if (els.backToTree) els.backToTree.disabled = true;
   updateObjectButtons();
 }
 
 function setTreeBrowseMode(enabled) {
   els.shell.classList.toggle("tree-browse", Boolean(enabled));
+  if (els.backToTree) els.backToTree.disabled = Boolean(enabled) || !state.currentManifest?.tree;
 }
 
 function updateObjectButtons() {
@@ -227,8 +230,6 @@ function showOperationError(error) {
 }
 
 async function chooseFolderPath() {
-  const typed = els.path.value.trim();
-  if (typed) return typed;
   const controller = createOperationController();
   const response = await fetch("/api/choose-folder", { method: "POST", signal: controller.signal });
   const payload = await response.json();
@@ -253,7 +254,6 @@ async function importObject(forceRefresh = false) {
   if (!response.ok) throw new Error(payload.error || "Объект не загружен");
   if (state.progressCancelled) return;
   state.selectedObjectId = payload.id;
-  els.path.value = payload.rootPath;
   await loadObjectSummaries();
   finishProgress(forceRefresh ? "Объект обновлён" : "Объект загружен");
 }
@@ -327,10 +327,31 @@ function selectNode(node, event) {
   renderTree();
 }
 
+async function copyPathToClipboard(path) {
+  if (!path) return;
+  try {
+    await navigator.clipboard.writeText(path);
+    els.selectionSummary.textContent = "Путь скопирован";
+  } catch {
+    const fallback = document.createElement("textarea");
+    fallback.value = path;
+    fallback.setAttribute("readonly", "");
+    fallback.style.position = "fixed";
+    fallback.style.left = "-9999px";
+    document.body.append(fallback);
+    fallback.select();
+    document.execCommand("copy");
+    fallback.remove();
+    els.selectionSummary.textContent = "Путь скопирован";
+  }
+  window.setTimeout(updateSelectionSummary, 1100);
+}
+
 function renderTreeNode(node, parent) {
   if (!nodeMatches(node)) return;
   const row = document.createElement("div");
   row.className = `tree-row ${node.type}`;
+  row.dataset.path = node.path;
   row.classList.toggle("selected", state.selectedPaths.has(node.path));
   row.title = node.path;
   const collapsed = state.collapsedFolders.has(node.path);
@@ -344,11 +365,21 @@ function renderTreeNode(node, parent) {
   const metaEl = document.createElement("span");
   metaEl.className = "tree-meta";
   metaEl.textContent = node.type === "file" ? node.extension : (node.children || []).length;
-  row.append(iconEl, nameEl, metaEl);
+  const copyButton = document.createElement("button");
+  copyButton.type = "button";
+  copyButton.className = "copy-path-button";
+  copyButton.textContent = "⧉";
+  copyButton.title = "Скопировать полный путь";
+  copyButton.setAttribute("aria-label", "Скопировать полный путь");
+  row.append(iconEl, nameEl, metaEl, copyButton);
 
   row.addEventListener("click", (event) => {
     event.stopPropagation();
     selectNode(node, event);
+  });
+  copyButton.addEventListener("click", (event) => {
+    event.stopPropagation();
+    copyPathToClipboard(node.path);
   });
   row.addEventListener("dblclick", (event) => {
     event.stopPropagation();
@@ -441,6 +472,7 @@ async function openSelectedObject() {
   state.selectedPaths.clear();
   state.activeFilter = "";
   state.collapsedFolders.clear();
+  state.renderedPages = [];
   setMode("tree");
   setTreeBrowseMode(true);
   renderFormats();
@@ -467,8 +499,6 @@ function collectPdfFilesForDisplay() {
           .forEach(addPdf);
       }
     });
-  } else {
-    state.visibleRows.forEach(addPdf);
   }
 
   return [...result.values()];
@@ -477,35 +507,55 @@ function collectPdfFilesForDisplay() {
 function renderPdfViewer(pages) {
   state.renderedPages = pages;
   els.pdfThumbs.replaceChildren();
+  els.pdfViewer.classList.toggle("empty", !pages.length);
   if (!pages.length) {
-    els.pdfPageImage.hidden = true;
-    els.viewerEmpty.hidden = false;
-    els.viewerEmpty.textContent = "PDF-страницы не отрендерены.";
+    if (!state.activePageKey) {
+      els.pdfPageImage.hidden = true;
+    }
+    els.viewerEmpty.hidden = true;
+    els.viewerEmpty.textContent = "";
     setQualityBadge("");
     return;
   }
+  els.viewerEmpty.hidden = true;
 
-  pages.forEach((page, index) => {
+  pages.forEach((page) => {
+    const key = pageKey(page);
     const thumb = document.createElement("button");
     thumb.type = "button";
     thumb.className = "pdf-thumb";
-    thumb.classList.toggle("active", index === 0);
+    thumb.dataset.pageKey = key;
+    thumb.classList.toggle("active", key === state.activePageKey);
     thumb.title = page.name;
 
     const img = document.createElement("img");
     img.src = page.url;
     img.alt = page.name;
+    img.draggable = false;
     const label = document.createElement("span");
     label.textContent = page.name;
     thumb.append(img, label);
     thumb.addEventListener("click", () => showPdfPage(page));
     els.pdfThumbs.append(thumb);
   });
-  showPdfPage(pages[0]);
+
+  const currentPage = pages.find((page) => pageKey(page) === state.activePageKey);
+  if (currentPage) {
+    updateActivePdfThumb();
+    return;
+  }
+  if (!state.activePageKey || els.pdfPageImage.hidden) showPdfPage(pages[0]);
+  else updateActivePdfThumb();
 }
 
 function pageKey(page) {
   return `${page.documentPath || ""}|${page.page || ""}`;
+}
+
+function updateActivePdfThumb() {
+  [...els.pdfThumbs.querySelectorAll(".pdf-thumb")].forEach((thumb) => {
+    thumb.classList.toggle("active", thumb.dataset.pageKey === state.activePageKey);
+  });
 }
 
 function setQualityBadge(textValue, mode = "") {
@@ -568,6 +618,7 @@ function showPdfPage(page) {
   els.pdfPageImage.src = displayPage.url;
   els.pdfPageImage.hidden = false;
   els.viewerEmpty.hidden = true;
+  els.pdfViewer.classList.remove("empty");
   els.viewerControls.hidden = false;
   setQualityBadge(
     displayPage.dpi >= PDF_QUALITY_DPI
@@ -575,10 +626,7 @@ function showPdfPage(page) {
       : `Обзор ${displayPage.dpi || PDF_PREVIEW_DPI} DPI`,
     displayPage.dpi >= PDF_QUALITY_DPI ? "ready" : "",
   );
-  [...els.pdfThumbs.querySelectorAll(".pdf-thumb")].forEach((thumb) => {
-    const img = thumb.querySelector("img");
-    thumb.classList.toggle("active", img?.getAttribute("src") === page.url);
-  });
+  updateActivePdfThumb();
   if (els.pdfPageImage.complete && els.pdfPageImage.naturalWidth) fitPdfPage();
   requestHighQualityPage(page);
 }
@@ -762,8 +810,13 @@ els.display.addEventListener("click", () => {
 els.exclude.addEventListener("click", () => excludeSelectedObject().catch(showOperationError));
 els.cancel.addEventListener("click", () => stopProgress(true));
 els.backToObjects.addEventListener("click", () => setMode("objects"));
+els.backToTree.addEventListener("click", () => {
+  if (!state.currentManifest?.tree) return;
+  setViewerMode("standard");
+  setTreeBrowseMode(true);
+  renderTree();
+});
 els.treeSearch.addEventListener("input", () => {
-  state.selectedPaths.clear();
   renderTree();
 });
 els.pdfPageImage.addEventListener("load", () => fitPdfPage());

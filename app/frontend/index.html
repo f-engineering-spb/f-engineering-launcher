@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>F-Engineering Launcher v3</title>
-  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="styles.css?v=20260812-6">
 </head>
 <body>
   <main class="shell">
@@ -15,7 +15,6 @@
         <button id="displayObject" type="button" disabled title="Открыть выбранный объект: показать дерево, поиск и фильтры файлов.">Отобразить</button>
         <button id="excludeObject" type="button" disabled title="Убрать объект из списка Launcher. Исходная папка не удаляется.">Исключить</button>
       </div>
-
       <div class="progress-panel" id="progressPanel" hidden>
         <div class="progress-head"><span id="progressLabel">Операция…</span><strong id="progressValue">0%</strong></div>
         <div class="progress-track"><span id="progressFill"></span></div>
@@ -24,15 +23,16 @@
       </div>
 
       <section class="state active" id="objectListState">
-        <label class="path-label" for="objectPath">Путь для загрузки, если диалог Windows недоступен</label>
-        <textarea id="objectPath" rows="2" spellcheck="false" placeholder="C:\Users\a9379\Documents\Legenda_Leningradskoe"></textarea>
         <div class="section-title">Объекты</div>
         <div class="object-list" id="objectList"></div>
         <div class="stats" id="objectStats">Объект не выбран</div>
       </section>
 
       <section class="state" id="treeState">
-        <button class="back-button" id="backToObjects" type="button" title="Вернуться к списку загруженных объектов">← К объектам</button>
+        <div class="tree-nav">
+          <button class="back-button" id="backToObjects" type="button" title="Вернуться к списку загруженных объектов">К объектам</button>
+          <button class="back-button" id="backToTree" type="button" disabled title="Вернуться к предыдущему состоянию дерева">Назад</button>
+        </div>
         <input class="search-input" id="treeSearch" type="search" placeholder="Поиск: pdf, разрез, спецификация…" spellcheck="false">
         <div class="format-strip" id="formatStrip"></div>
         <div class="selection-summary" id="selectionSummary">Выделение пустое</div>
@@ -41,12 +41,12 @@
     </aside>
 
     <section class="viewer" aria-label="Область просмотра PDF">
-      <div class="pdf-viewer" id="pdfViewer">
+      <div class="pdf-viewer empty" id="pdfViewer">
         <div class="pdf-thumbs" id="pdfThumbs"></div>
         <div class="pdf-stage" id="pdfStage">
-          <div class="viewer-empty" id="viewerEmpty">Выберите PDF в дереве и нажмите «Отобразить».</div>
+          <div class="viewer-empty" id="viewerEmpty"></div>
           <div class="quality-badge" id="qualityBadge" hidden>Обзор 150 DPI</div>
-          <img id="pdfPageImage" alt="Отрендеренная страница PDF" hidden>
+          <img id="pdfPageImage" alt="" hidden>
           <div class="viewer-controls" id="viewerControls" hidden>
             <button id="viewZoomOut" type="button" title="Уменьшить">−</button>
             <button id="viewZoomIn" type="button" title="Увеличить">+</button>
@@ -61,6 +61,6 @@
       </div>
     </section>
   </main>
-  <script src="app.js"></script>
+  <script src="app.js?v=20260812-6"></script>
 </body>
 </html>

@@ -1,13 +1,17 @@
 :root {
-  --bg: #f7f8f9;
-  --panel: #e9ebed;
-  --panel-soft: #f3f4f5;
-  --line: #c8ccd0;
-  --line-strong: #8f98a3;
+  --bg: #fbfcfd;
+  --panel: #f1f5f7;
+  --panel-soft: #fbfcfd;
+  --line: #d0dbe1;
+  --line-strong: #bdccd4;
   --text: #1f2328;
-  --muted: #657281;
-  --active: #dceeff;
-  --progress: #667f99;
+  --muted: #59636e;
+  --active: #e5edf1;
+  --active-strong: #d6e7ef;
+  --progress: #6e8fa2;
+  --shadow: rgba(31, 35, 40, .09);
+  --dot: #d7e1e7;
+  --paper: #ffffff;
 }
 
 * { box-sizing: border-box; }
@@ -50,34 +54,35 @@ html, body {
   overflow: hidden;
   border-right: 1px solid var(--line);
   background: var(--panel);
-  padding: 7px;
+  padding: 8px;
 }
 
 .action-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 6px;
-  margin-bottom: 7px;
+  gap: 5px;
+  margin-bottom: 6px;
 }
 
 button {
-  min-height: 33px;
+  min-height: 28px;
   border: 1px solid var(--line-strong);
-  border-radius: 6px;
+  border-radius: 9px;
   background: var(--panel-soft);
   color: var(--text);
   cursor: pointer;
-  font: 600 13px/1.1 "Segoe UI", system-ui, sans-serif;
+  font: 430 11px/1.15 "Segoe UI", system-ui, sans-serif;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, .55) inset;
 }
 
-button:hover:not(:disabled) { background: #e4e9ee; }
+button:hover:not(:disabled) { background: var(--active); }
 button:disabled { opacity: .45; cursor: default; }
 
 .progress-panel,
 .stats,
 .selection-summary {
   border: 1px solid var(--line);
-  border-radius: 7px;
+  border-radius: 10px;
   background: rgba(255, 255, 255, .5);
 }
 
@@ -136,20 +141,30 @@ button:disabled { opacity: .45; cursor: default; }
   flex-direction: column;
 }
 
-.path-label,
 .section-title {
   margin: 2px 0 5px;
   color: var(--muted);
   font-size: 11px;
 }
 
+.tree-nav {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  margin-bottom: 7px;
+}
+
+.tree-nav .back-button {
+  margin: 0;
+}
+
 textarea,
 .search-input {
   width: 100%;
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: 9px;
   color: var(--text);
-  background: #fff;
+  background: var(--paper);
   font: 12px/1.35 "Consolas", "Segoe UI Mono", monospace;
 }
 
@@ -171,8 +186,8 @@ textarea {
   min-height: 0;
   overflow: auto;
   border: 1px solid var(--line);
-  border-radius: 7px;
-  background: #f8fafc;
+  border-radius: 11px;
+  background: rgba(251, 252, 253, .72);
 }
 
 .object-list {
@@ -196,14 +211,17 @@ textarea {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 13px;
+  font-size: 11px;
+  font-weight: 430;
+  letter-spacing: -.006em;
 }
 
 .object-row span {
   display: block;
   overflow: hidden;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 10px;
+  font-weight: 400;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -233,27 +251,38 @@ textarea {
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
+  align-content: flex-start;
+  max-height: 54px;
+  min-height: 24px;
   margin-bottom: 7px;
+  overflow: auto;
+  resize: vertical;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: rgba(251, 252, 253, .52);
 }
 
 .format-chip {
-  min-height: 24px;
-  padding: 0 7px;
+  min-height: 20px;
+  padding: 0 6px;
   border-color: var(--line-strong);
-  font-size: 11px;
+  font-size: 10px;
+  font-weight: 430;
 }
 
 .format-chip.active {
-  background: var(--active);
+  background: var(--active-strong);
 }
 
 .tree {
   flex: 1;
   padding: 5px 0;
-  font-size: 12px;
+  font-size: 11.75px;
 }
 
 .tree-row {
+  position: relative;
   display: grid;
   grid-template-columns: 18px minmax(0, 1fr) auto;
   gap: 5px;
@@ -266,14 +295,15 @@ textarea {
   cursor: pointer;
 }
 
-.tree-row:hover { background: #eef2f5; }
+.tree-row:hover { background: var(--active); }
+
 .tree-row.selected {
   border-color: rgba(31, 35, 40, .45);
-  background: var(--active);
+  background: var(--active-strong);
 }
 
 .tree-row.hidden { display: none; }
-.tree-row.folder { font-weight: 600; }
+.tree-row.folder { font-weight: 450; }
 
 .tree-name {
   overflow: hidden;
@@ -282,7 +312,37 @@ textarea {
 
 .tree-meta {
   color: var(--muted);
-  font-size: 11px;
+  font-size: 10.75px;
+}
+
+.copy-path-button {
+  position: absolute;
+  top: 50%;
+  right: 4px;
+  width: 22px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid rgba(102, 127, 153, .45);
+  border-radius: 4px;
+  background: rgba(251, 252, 253, .76);
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1;
+  opacity: 0;
+  cursor: pointer;
+  transform: translateY(-50%);
+  transition: opacity .12s ease, background .12s ease, border-color .12s ease;
+}
+
+.tree-row:hover .copy-path-button,
+.tree-row:focus-within .copy-path-button {
+  opacity: 1;
+}
+
+.copy-path-button:hover {
+  border-color: var(--line-strong);
+  background: var(--active);
+  color: var(--ink);
 }
 
 .tree-children { margin-left: 16px; }
@@ -317,7 +377,7 @@ textarea {
   grid-template-columns: 18px max-content auto;
   width: max-content;
   min-width: 100%;
-  padding-right: 18px;
+  padding-right: 32px;
 }
 
 .shell.tree-browse .tree-name {
@@ -334,7 +394,8 @@ textarea {
   display: flex;
   min-width: 0;
   min-height: 0;
-  background-image: radial-gradient(#d3d7db 1px, transparent 1px);
+  background-color: var(--bg);
+  background-image: radial-gradient(var(--dot) 1px, transparent 1px);
   background-size: 24px 24px;
 }
 
@@ -345,6 +406,15 @@ textarea {
   height: 100%;
   min-width: 0;
   min-height: 0;
+}
+
+.pdf-viewer.empty {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.pdf-viewer.empty .pdf-thumbs,
+.pdf-viewer.empty .viewer-empty {
+  display: none;
 }
 
 .shell.full-view .pdf-viewer {
@@ -360,8 +430,9 @@ textarea {
   min-height: 0;
   overflow: auto;
   border-right: 1px solid var(--line);
-  background: rgba(233, 235, 237, .72);
+  background: transparent;
   padding: 6px;
+  user-select: none;
 }
 
 .pdf-thumb {
@@ -373,8 +444,10 @@ textarea {
   padding: 5px;
   border: 1px solid var(--line);
   border-radius: 7px;
-  background: rgba(255, 255, 255, .74);
+  background: rgba(251, 252, 253, .78);
   text-align: left;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .pdf-thumb:hover,
@@ -390,6 +463,8 @@ textarea {
   object-fit: contain;
   border: 1px solid rgba(200, 204, 208, .9);
   background: #fff;
+  -webkit-user-drag: none;
+  user-select: none;
 }
 
 .pdf-thumb span {
@@ -400,6 +475,8 @@ textarea {
   font-size: 11px;
   line-height: 1.25;
   text-overflow: ellipsis;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .pdf-stage {
@@ -418,10 +495,12 @@ textarea {
   top: 50%;
   max-width: none;
   max-height: none;
-  background: #fff;
-  box-shadow: 0 8px 26px rgba(31, 35, 40, .16);
+  background: var(--paper);
+  box-shadow: 0 10px 30px var(--shadow);
   transform-origin: center center;
   will-change: transform;
+  -webkit-user-drag: none;
+  user-select: none;
 }
 
 .pdf-stage.pan-mode {
@@ -442,16 +521,16 @@ textarea {
   gap: 5px;
   padding: 5px;
   border: 1px solid var(--line-strong);
-  border-radius: 9px;
-  background: rgba(243, 244, 245, .62);
-  box-shadow: 0 6px 18px rgba(31, 35, 40, .12);
+  border-radius: 12px;
+  background: rgba(251, 252, 253, .64);
+  box-shadow: 0 8px 20px var(--shadow);
   opacity: .78;
   transform: translateX(-50%);
   transition: opacity .12s ease, background .12s ease;
 }
 
 .viewer-controls:hover {
-  background: rgba(243, 244, 245, .92);
+  background: rgba(251, 252, 253, .94);
   opacity: 1;
 }
 
@@ -461,10 +540,11 @@ textarea {
   padding: 0 7px;
   border-radius: 5px;
   font-size: 12px;
+  font-weight: 500;
 }
 
 .viewer-controls button.active {
-  background: var(--active);
+  background: var(--active-strong);
 }
 
 .quality-badge {
@@ -474,12 +554,12 @@ textarea {
   z-index: 4;
   max-width: min(360px, calc(100% - 20px));
   overflow: hidden;
-  padding: 5px 9px;
+  padding: 4px 8px;
   border: 1px solid rgba(102, 127, 153, .72);
   border-radius: 999px;
-  background: rgba(243, 244, 245, .78);
+  background: rgba(251, 252, 253, .78);
   color: var(--muted);
-  font: 600 11px/1.2 "Segoe UI", system-ui, sans-serif;
+  font: 430 10px/1.2 "Segoe UI", system-ui, sans-serif;
   text-overflow: ellipsis;
   white-space: nowrap;
   pointer-events: none;
@@ -487,7 +567,7 @@ textarea {
 
 .quality-badge.ready {
   color: #314f6e;
-  background: rgba(220, 238, 255, .84);
+  background: rgba(229, 237, 241, .88);
 }
 
 .quality-badge.loading {

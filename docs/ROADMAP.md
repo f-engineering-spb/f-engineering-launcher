@@ -71,9 +71,13 @@ DWG files often have matching PDF files.
 Desired behaviour:
 
 - detect likely DWG/PDF pairs by name and folder;
+- prefer a project rule where paired DWG and PDF files are named one-to-one;
 - use the matching PDF as the visual preview for the DWG;
 - let the user jump from preview to the DWG file;
+- show an action such as `Open in DWG Viewer` / native DWG application;
 - open the DWG in the native application when needed.
+
+Status: next implementation phase after the accepted PDF/UI checkpoint.
 
 ## Phase 6 - Word and Excel previews
 

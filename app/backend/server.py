@@ -159,6 +159,86 @@ def pdf_cache_key(path: Path, dpi: int) -> str:
     return hashlib.sha1(raw.casefold().encode("utf-8")).hexdigest()[:20]
 
 
+def pdf_page_item(path: Path, key: str, page: int, png: Path) -> dict:
+    return {
+        "page": page,
+        "name": f"{path.name} · стр. {page}",
+        "url": f"/cache/pdf/{key}/{png.name}",
+        "bytes": png.stat().st_size,
+    }
+
+
+def read_pdf_cache_manifest(path: Path, dpi: int, key: str, target_dir: Path) -> dict | None:
+    manifest_path = target_dir / "manifest.json"
+    manifest = None
+    if manifest_path.exists():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            manifest = None
+        if manifest and (manifest.get("path") != str(path) or manifest.get("dpi") != dpi or manifest.get("cacheKey") != key):
+            manifest = None
+    if not manifest:
+        legacy_items = []
+        for png in sorted(target_dir.glob("page-*.png")):
+            try:
+                page = int(png.stem.removeprefix("page-"))
+            except ValueError:
+                continue
+            if page > 0 and png.stat().st_size > 0:
+                legacy_items.append(pdf_page_item(path, key, page, png))
+        if not legacy_items:
+            return None
+        return {
+            "name": path.name,
+            "path": str(path),
+            "dpi": dpi,
+            "pages": max(item["page"] for item in legacy_items),
+            "renderedPages": len(legacy_items),
+            "cacheKey": key,
+            "complete": False,
+            "errors": [],
+            "items": legacy_items,
+        }
+    items = []
+    for item in manifest.get("items", []):
+        page = int(item.get("page") or 0)
+        png = target_dir / f"page-{page}.png"
+        if page > 0 and png.exists() and png.stat().st_size > 0:
+            items.append(pdf_page_item(path, key, page, png))
+    if not items:
+        return None
+    manifest["items"] = items
+    return manifest
+
+
+def write_pdf_cache_manifest(
+    path: Path,
+    dpi: int,
+    key: str,
+    target_dir: Path,
+    page_count: int,
+    items: list[dict],
+    errors: list[dict],
+) -> None:
+    manifest = {
+        "name": path.name,
+        "path": str(path),
+        "dpi": dpi,
+        "pages": page_count,
+        "renderedPages": len(items),
+        "cacheKey": key,
+        "complete": len(items) == page_count and not errors,
+        "errors": errors,
+        "items": items,
+        "updatedAt": datetime.now().isoformat(timespec="seconds"),
+    }
+    (target_dir / "manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
 def poppler_tool(name: str) -> str | None:
     exe = POPPLER_BIN_DIR / f"{name}.exe"
     if exe.exists():
@@ -209,15 +289,33 @@ def render_pdf(path: Path, dpi: int = DEFAULT_PDF_DPI) -> dict:
     if not path.is_file() or path.suffix.casefold() != ".pdf":
         raise ValueError(f"Это не PDF-файл: {path}")
 
+    key = pdf_cache_key(path, dpi)
+    target_dir = PDF_CACHE_DIR / key
+    target_dir.mkdir(parents=True, exist_ok=True)
+    cached_manifest = read_pdf_cache_manifest(path, dpi, key, target_dir)
+    if cached_manifest:
+        cached_items = cached_manifest["items"]
+        cached_errors = cached_manifest.get("errors", [])
+        return {
+            "name": path.name,
+            "path": str(path),
+            "dpi": dpi,
+            "pages": cached_manifest.get("pages", len(cached_items)),
+            "renderedPages": len(cached_items),
+            "cacheKey": key,
+            "cacheHit": True,
+            "cacheHitPages": len(cached_items),
+            "newRenderedPages": 0,
+            "errors": cached_errors,
+            "items": cached_items,
+        }
+
     pdftoppm = poppler_tool("pdftoppm")
     if not pdftoppm:
         raise RuntimeError("pdftoppm не найден. Нужен Poppler из runtime.")
 
     page_count = pdf_page_count(path)
     started_at = time.monotonic()
-    key = pdf_cache_key(path, dpi)
-    target_dir = PDF_CACHE_DIR / key
-    target_dir.mkdir(parents=True, exist_ok=True)
 
     pages = []
     errors = []
@@ -268,14 +366,7 @@ def render_pdf(path: Path, dpi: int = DEFAULT_PDF_DPI) -> dict:
                 continue
 
         if png.exists() and png.stat().st_size > 0:
-            pages.append(
-                {
-                    "page": page,
-                    "name": f"{path.name} · стр. {page}",
-                    "url": f"/cache/pdf/{key}/{png.name}",
-                    "bytes": png.stat().st_size,
-                }
-            )
+            pages.append(pdf_page_item(path, key, page, png))
 
     if not pages:
         result = run_poppler(
@@ -285,6 +376,7 @@ def render_pdf(path: Path, dpi: int = DEFAULT_PDF_DPI) -> dict:
         tool_version = (result.stderr or result.stdout).strip()
         raise RuntimeError(f"Не удалось отрендерить ни одной страницы PDF. {tool_version}. Ошибки: {errors}")
 
+    write_pdf_cache_manifest(path, dpi, key, target_dir, page_count, pages, errors)
     return {
         "name": path.name,
         "path": str(path),
@@ -345,8 +437,15 @@ def render_pdf_page(path: Path, page: int, dpi: int = DEFAULT_PDF_DPI) -> dict:
             raise RuntimeError(f"Таймаут рендера страницы {page}: {PDF_PAGE_TIMEOUT_SECONDS} сек.") from error
         if result.returncode != 0:
             raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "pdftoppm не смог отрендерить страницу")
-        if not png.exists() or png.stat().st_size <= 0:
-            raise RuntimeError("pdftoppm не создал PNG страницы")
+    if not png.exists() or png.stat().st_size <= 0:
+        raise RuntimeError("pdftoppm не создал PNG страницы")
+
+    item = pdf_page_item(path, key, page, png)
+    cached_manifest = read_pdf_cache_manifest(path, dpi, key, target_dir)
+    items_by_page = {existing["page"]: existing for existing in (cached_manifest or {}).get("items", [])}
+    items_by_page[page] = item
+    items = [items_by_page[index] for index in sorted(items_by_page)]
+    write_pdf_cache_manifest(path, dpi, key, target_dir, page_count, items, (cached_manifest or {}).get("errors", []))
 
     return {
         "name": path.name,
@@ -356,12 +455,7 @@ def render_pdf_page(path: Path, page: int, dpi: int = DEFAULT_PDF_DPI) -> dict:
         "page": page,
         "cacheKey": key,
         "cacheHit": cache_hit,
-        "item": {
-            "page": page,
-            "name": f"{path.name} · стр. {page}",
-            "url": f"/cache/pdf/{key}/{png.name}",
-            "bytes": png.stat().st_size,
-        },
+        "item": item,
     }
 
 
