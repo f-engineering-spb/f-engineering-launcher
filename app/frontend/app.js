@@ -869,6 +869,7 @@ function clearExcelViewer() {
   state.excelWorkbookIndex = 0;
   state.excelSheetIndex = 0;
   state.excelScale = 1;
+  state.view.rotation = 0;
   els.excelViewer.hidden = true;
   els.excelBookTitle.textContent = "";
   els.excelBookTitle.title = "";
@@ -972,7 +973,7 @@ async function activateExcelWorkbook(index) {
   });
   els.excelViewer.hidden = false;
   els.viewerControls.hidden = false;
-  els.viewRotate.hidden = true;
+  els.viewRotate.hidden = false;
   els.viewPanMode.hidden = false;
   setActiveNativePath(workbook.path);
   updateViewTransform();
@@ -1177,6 +1178,7 @@ function updateViewTransform() {
   els.viewPanMode.classList.toggle("active", view.panMode);
   if (state.excelWorkbook) {
     els.excelSheetFrame.contentWindow?.postMessage({ type: "launcher-sheet-hand", value: view.panMode }, "*");
+    els.excelSheetFrame.contentWindow?.postMessage({ type: "launcher-sheet-rotate", value: view.rotation }, "*");
   }
 }
 

@@ -105,20 +105,29 @@ Candidate strategies:
 - external converters;
 - hybrid preview cache plus native open.
 
-Status:
+Status: functioning and accepted for current stage.
 
 - Word/DOC/DOCX/GDOC: functioning and accepted for current stage.
-- Excel/XLS/XLSX: next major implementation phase.
+- Excel/XLSX/XLSM: functioning and accepted for normal review workbooks.
+- XLS: remains visible and natively openable; local HTML conversion needs a
+  separate compatibility test.
 
 Accepted Word checkpoint:
 
 - `docs/CHECKPOINT_2026-08-12_VORTEX_WORD_ACCEPTED.md`
 
-First step:
+Accepted checkpoints:
 
-- investigate Excel preview strategy on local Windows;
-- keep the accepted PDF and DWG flows untouched;
-- choose the fastest reliable path for preview generation.
+- `docs/CHECKPOINT_2026-08-12_VORTEX_WORD_ACCEPTED.md`
+- `docs/CHECKPOINT_2026-08-13_VORTEX_EXCEL_ACCEPTED.md`
+- `docs/CHECKPOINT_2026-08-13_VIEWER_CONTROLS_AND_TREE.md`
+
+Next refinement:
+
+- regression-test the accepted formats with ordinary object folders;
+- investigate a safe optional Model Space overview route for DWG files without
+  PDF pairs.  The first preview target is the complete model, not a Layout:
+  it is an orientation image, while detailed work remains in native CAD.
 
 ## Phase 7 - Modules
 

@@ -95,3 +95,27 @@ Excel is a read-only navigation surface, not a second Excel editor.
   `scripts/check_encoding.cmd`, then real browser QA with several ordinary
   workbooks, including one multi-sheet file.  Do not generalize from damaged
   or unusually large workbooks that Office itself struggles to open.
+
+## Accepted Excel tab rule
+
+- Excel sheet tabs are ordinary HTML buttons. Keep the proven rounded-button
+  implementation with immediate active-state feedback.
+- Do not reintroduce experimental tab shapes, overlapping tabs, SVG tab
+  backgrounds, or pseudo-element browser-cap effects: they caused visual
+  artefacts and delayed active-state feedback.
+
+## Accepted viewer control and layer rules — 2026-08-13 checkpoint
+
+- The bottom viewer panel is one shared control set for PDF, DWG previews,
+  Word previews, and Excel sheets.  It must retain zoom, `Вписать`, rotate,
+  hand/arrow, and the three viewing modes.  Do not make a reduced Excel or
+  Word variant.
+- `Вписать` must always have enough fixed width for its full Russian label;
+  it must never be clipped or wrapped because another format has a different
+  panel layout.
+- Excel HTML is an overlay layer.  Its semantic `hidden` state must map to
+  `display: none`; otherwise an inactive Excel iframe can cover a correctly
+  rendered PDF, DWG preview, or Word page and make the large image look blank.
+- Before changing a shared viewer control or layer, inspect both an Excel
+  workbook and a PDF/DWG preview in the real browser.  Do not infer cross-
+  format behaviour from one mode alone.
