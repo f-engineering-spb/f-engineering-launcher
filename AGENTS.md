@@ -70,3 +70,28 @@ The accepted state at the end of 2026-08-12:
 - Treat `.gdoc` as a Google Docs shortcut, not as a local Word document.
 - `.gdoc` must be visible in filters/tree and openable, but it should show a no-local-preview placeholder instead of being sent through Microsoft Word.
 - Next Vortex target is Excel: `.xls` / `.xlsx`.
+
+## Accepted Vortex Excel rules — 2026-08-13 checkpoint
+
+Excel is a read-only navigation surface, not a second Excel editor.
+
+- Support `.xlsx` / `.xlsm` through an HTML cache per workbook sheet.  Keep
+  `.xls` visible and natively openable; add conversion support only after a
+  separate compatibility test.
+- The large view is the source of truth: it preserves sheet tabs, authored
+  column widths, row heights, merges, basic fonts, fills, scrolling, zoom and
+  hand panning.
+- A workbook card/thumbnail must be a reduced viewport of that exact cached
+  HTML sheet.  Never create a second simplified raster/table renderer for
+  Excel thumbnails.  Separate renderers caused wrong text baselines, clipped
+  rows and a mismatch between card and large view.
+- Build the first selected sheet synchronously; prepare remaining sheets in
+  the background, one at a time.  A cached sheet request must not reopen the
+  workbook merely to rediscover its title.
+- Do not show technical notices inside a worksheet canvas.  Show the complete
+  workbook file name in the Launcher chrome above its sheet tabs.  Card labels
+  must not use ellipses: wrap or allow horizontal reading of the full name.
+- Before declaring Excel work accepted, run: Python compile, JS syntax check,
+  `scripts/check_encoding.cmd`, then real browser QA with several ordinary
+  workbooks, including one multi-sheet file.  Do not generalize from damaged
+  or unusually large workbooks that Office itself struggles to open.

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import html
 import json
 import mimetypes
 import os
@@ -14,6 +15,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
+try:
+    import openpyxl
+except ImportError:  # pragma: no cover - reported through the local API
+    openpyxl = None
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FRONTEND_DIR = REPO_ROOT / "app" / "frontend"
@@ -21,13 +27,18 @@ RUNTIME_DIR = REPO_ROOT / "runtime"
 MANIFESTS_DIR = RUNTIME_DIR / "manifests"
 PDF_CACHE_DIR = RUNTIME_DIR / "cache" / "pdf"
 WORD_CACHE_DIR = RUNTIME_DIR / "cache" / "word"
+EXCEL_CACHE_DIR = RUNTIME_DIR / "cache" / "excel"
 WORD_CONVERT_SCRIPT = REPO_ROOT / "scripts" / "convert_word_to_pdf.ps1"
+EXCEL_CONVERT_SCRIPT = REPO_ROOT / "scripts" / "convert_excel_to_pdf.ps1"
 VERSION = "0.4.0-v3-pdf-render"
 SKIP_DIR_NAMES = {".git", "__pycache__", "node_modules", ".venv", "venv"}
 DEFAULT_PDF_DPI = 300
 PDF_PAGE_TIMEOUT_SECONDS = 25
 PDF_DOCUMENT_TIMEOUT_SECONDS = 75
 WORD_CONVERT_TIMEOUT_SECONDS = 120
+EXCEL_CONVERT_TIMEOUT_SECONDS = 180
+MAX_XLSX_ROWS = 2000
+MAX_XLSX_COLS = 100
 POPPLER_BIN_DIR = (
     Path.home()
     / ".cache"
@@ -171,6 +182,10 @@ def file_cache_key(path: Path, purpose: str) -> str:
 
 def is_word_file(path: Path) -> bool:
     return path.suffix.casefold() in {".doc", ".docx"}
+
+
+def is_excel_file(path: Path) -> bool:
+    return path.suffix.casefold() in {".xls", ".xlsx", ".xlsm"}
 
 
 def pdf_page_item(path: Path, key: str, page: int, png: Path) -> dict:
@@ -333,6 +348,7 @@ def word_to_pdf(path: Path) -> tuple[Path, bool]:
     process = subprocess.run(
         [
             "powershell",
+            "-STA",
             "-NoProfile",
             "-ExecutionPolicy",
             "Bypass",
@@ -376,6 +392,315 @@ def word_to_pdf(path: Path) -> tuple[Path, bool]:
 
 def render_word(path: Path, dpi: int = DEFAULT_PDF_DPI) -> dict:
     pdf_path, convert_cache_hit = word_to_pdf(path)
+    document = render_pdf(pdf_path, dpi=dpi)
+    document["sourcePath"] = str(path)
+    document["sourceName"] = path.name
+    document["sourceType"] = file_extension(path)
+    document["convertedPdfPath"] = str(pdf_path)
+    document["convertCacheHit"] = convert_cache_hit
+    return document
+
+
+def excel_html_cache_dir(path: Path) -> Path:
+    """Return an immutable cache location for one exact workbook revision."""
+    return EXCEL_CACHE_DIR / "html" / file_cache_key(path, "excel-html")
+
+
+def excel_cell_color(color: object) -> str | None:
+    value = getattr(color, "rgb", None)
+    value = str(value) if value is not None else ""
+    if not value or len(value) < 6 or (len(value) == 8 and value[:2] == "00"):
+        return None
+    return f"#{value[-6:]}"
+
+
+def excel_sheet_html(path: Path, sheet_index: int) -> tuple[str, dict]:
+    """Create a read-only HTML sheet with authored geometry.
+
+    The Launcher is a fast navigator, not a replacement for Excel.  The limit is
+    intentional: long operational registers are opened in the native program.
+    """
+    if openpyxl is None:
+        raise RuntimeError("Для HTML-просмотра Excel нужен пакет openpyxl")
+    if path.suffix.casefold() not in {".xlsx", ".xlsm"}:
+        raise ValueError("HTML-просмотр пока поддерживает XLSX/XLSM. Откройте XLS в Excel.")
+
+    styles_book = openpyxl.load_workbook(path, read_only=False, data_only=False)
+    values_book = openpyxl.load_workbook(path, read_only=False, data_only=True)
+    try:
+        sheet = styles_book.worksheets[sheet_index]
+        values = values_book.worksheets[sheet_index]
+        # Some valid workbooks (notably registers exported by third-party
+        # systems) have no stored dimension in one of the loaded views.
+        # openpyxl then returns None, which must mean an empty 1x1 sheet here,
+        # not an unhandled server exception and a blank Launcher screen.
+        sheet_max_row = int(sheet.max_row or 1)
+        values_max_row = int(values.max_row or 1)
+        sheet_max_column = int(sheet.max_column or 1)
+        values_max_column = int(values.max_column or 1)
+        max_column = min(max(sheet_max_column, values_max_column), MAX_XLSX_COLS)
+        columns = [
+            column
+            for column in range(1, max_column + 1)
+            if not sheet.column_dimensions[openpyxl.utils.get_column_letter(column)].hidden
+        ]
+        column_pixels = {}
+        for column in columns:
+            width = sheet.column_dimensions[openpyxl.utils.get_column_letter(column)].width or 8.43
+            column_pixels[column] = max(4, min(720, round(width * 7 + 5)))
+
+        merged_start = {}
+        merged_skip = set()
+        for area in sheet.merged_cells.ranges:
+            shown_columns = [column for column in columns if area.min_col <= column <= area.max_col]
+            if not shown_columns:
+                continue
+            start = (area.min_row, shown_columns[0])
+            merged_start[start] = (len(shown_columns), area.max_row - area.min_row + 1)
+            for row in range(area.min_row, area.max_row + 1):
+                for column in shown_columns:
+                    if (row, column) != start:
+                        merged_skip.add((row, column))
+
+        first_value_row = 0
+        last_value_row = 0
+        for row in range(1, min(values_max_row, MAX_XLSX_ROWS) + 1):
+            if any(values.cell(row, column).value is not None for column in columns):
+                if not first_value_row:
+                    first_value_row = row
+                last_value_row = row
+        last_merge_row = max((area.max_row for area in sheet.merged_cells.ranges), default=0)
+        rendered_rows = min(max(last_value_row, last_merge_row), MAX_XLSX_ROWS)
+        was_limited = max(sheet_max_row, values_max_row) > MAX_XLSX_ROWS
+
+        first_rendered_row = first_value_row or 1
+        rows = []
+        for row in range(first_rendered_row, rendered_rows + 1):
+            if sheet.row_dimensions[row].hidden:
+                continue
+            cells = []
+            for column in columns:
+                if (row, column) in merged_skip:
+                    continue
+                cell = sheet.cell(row, column)
+                raw_value = values.cell(row, column).value
+                value = "" if raw_value is None else str(raw_value)
+                css = []
+                # A single neutral grid is supplied by the page stylesheet.
+                # Re-emitting four border declarations for every cell made a
+                # 2,000-row workbook produce 8–9 MB of HTML and a long white
+                # screen before Chrome could paint it.  This is a navigator,
+                # so fast first paint has priority over reproducing every
+                # individual spreadsheet border colour.
+                if cell.font.bold:
+                    css.append("font-weight:700")
+                if cell.font.italic:
+                    css.append("font-style:italic")
+                # Defaults are already declared once in the HTML stylesheet.
+                # Repeating Calibri 11px on every one of 52,000 cells turns a
+                # normal workbook into a multi-megabyte page that opens white.
+                if cell.font.sz and round(cell.font.sz) != 11:
+                    css.append(f"font-size:{max(6, min(32, cell.font.sz))}px")
+                if cell.font.name and cell.font.name.casefold() not in {"calibri", "arial", "segoe ui"}:
+                    css.append(f"font-family:{html.escape(cell.font.name, quote=True)}")
+                font_color = excel_cell_color(cell.font.color)
+                if font_color:
+                    css.append(f"color:{font_color}")
+                fill = excel_cell_color(cell.fill.fgColor)
+                if cell.fill.fill_type == "solid" and fill:
+                    css.append(f"background:{fill}")
+                if cell.alignment.horizontal in {"left", "center", "right"}:
+                    css.append(f"text-align:{cell.alignment.horizontal}")
+                if cell.alignment.vertical in {"top", "center", "bottom"}:
+                    css.append(f"vertical-align:{cell.alignment.vertical}")
+                if cell.alignment.wrap_text is False:
+                    css.append("white-space:pre;overflow:hidden")
+                colspan, rowspan = merged_start.get((row, column), (1, 1))
+                span = (f' colspan="{colspan}"' if colspan > 1 else "") + (f' rowspan="{rowspan}"' if rowspan > 1 else "")
+                cells.append(f'<td{span} style="{";".join(css)}">{html.escape(value)}</td>')
+            authored_height = sheet.row_dimensions[row].height
+            row_style = f' style="height:{max(1, round(authored_height * 1.33))}px"' if authored_height else ""
+            rows.append(f"<tr{row_style}><th>{row}</th>{''.join(cells)}</tr>")
+
+        cols = '<col class="row-number">' + "".join(
+            f'<col style="width:{column_pixels[column]}px">' for column in columns
+        )
+        table_width = 38 + sum(column_pixels.values())
+        notice = (
+            f"Показаны первые {MAX_XLSX_ROWS:,} строк. Полный рабочий файл откройте в Excel."
+            if was_limited else "Просмотр без редактирования"
+        )
+        rendered = {
+            "name": sheet.title,
+            "rows": max(0, rendered_rows - first_rendered_row + 1),
+            "firstRow": first_rendered_row,
+            "columns": len(columns),
+            "limited": was_limited,
+        }
+        page = f'''<!doctype html><html lang="ru"><head><meta charset="utf-8"><title>{html.escape(sheet.title)}</title>
+<style>
+html,body{{margin:0;min-width:max-content;background:#fff;color:#20262d;font:11px "Segoe UI",Arial,sans-serif;overflow:auto}}
+#sheet-canvas{{position:relative;transform-origin:0 0}}#sheet{{position:absolute;left:0;top:0;transform-origin:0 0}}
+.notice{{position:sticky;top:0;z-index:2;padding:6px 10px;border-bottom:1px solid #d3dde4;background:#f7fafc;color:#607080;font-size:11px}}
+table{{border-collapse:collapse;table-layout:fixed;width:{table_width}px}}col.row-number{{width:38px}}
+th,td{{box-sizing:border-box;border:1px solid #cbd5dc;padding:2px 4px;vertical-align:top;white-space:pre-wrap;overflow-wrap:break-word}}
+th{{position:sticky;left:0;z-index:1;background:#f1f5f7;color:#657687;font:10px "Segoe UI",Arial,sans-serif;text-align:right}}td{{overflow:hidden}}
+</style></head><body><div id="sheet-canvas"><div id="sheet"><table><colgroup>{cols}</colgroup><tbody>{''.join(rows)}</tbody></table></div></div>
+<script>const canvas=document.getElementById('sheet-canvas'),sheet=document.getElementById('sheet');let width=0,height=0,padding=0,scale=1,hand=true,dragging=false,startX=0,startY=0,startLeft=0,startTop=0;function zoom(value){{if(!width){{width=sheet.offsetWidth;height=sheet.offsetHeight}}scale=Math.max(.35,Math.min(3,value));padding=Math.max(innerWidth,innerHeight);canvas.style.width=(width*scale+padding*2)+'px';canvas.style.height=(height*scale+padding*2)+'px';sheet.style.transform='translate('+padding+'px,'+padding+'px) scale('+scale+')'}}function fit(){{if(!width)zoom(1);const value=Math.min(1,(innerWidth-48)/width,(innerHeight-48)/height);zoom(value);requestAnimationFrame(()=>{{scrollTo(padding,padding);parent.postMessage({{type:'launcher-sheet-fitted',value:scale}},'*')}})}}function cursor(){{document.body.style.cursor=hand?(dragging?'grabbing':'grab'):'default'}}addEventListener('load',()=>{{zoom(1);cursor();requestAnimationFrame(()=>scrollTo(padding,padding))}});addEventListener('wheel',event=>{{if(!event.ctrlKey)return;event.preventDefault();zoom(scale*(event.deltaY<0?1.12:.89))}},{{passive:false}});addEventListener('pointerdown',event=>{{if(!hand||event.button!==0)return;dragging=true;startX=event.clientX;startY=event.clientY;startLeft=scrollX;startTop=scrollY;document.body.setPointerCapture?.(event.pointerId);cursor();event.preventDefault()}});addEventListener('pointermove',event=>{{if(!dragging)return;scrollTo(startLeft-(event.clientX-startX),startTop-(event.clientY-startY))}});addEventListener('pointerup',event=>{{if(!dragging)return;dragging=false;document.body.releasePointerCapture?.(event.pointerId);cursor()}});addEventListener('pointercancel',()=>{{dragging=false;cursor()}});addEventListener('message',event=>{{if(!event.data)return;if(event.data.type==='launcher-sheet-zoom')zoom(event.data.value);if(event.data.type==='launcher-sheet-fit')fit();if(event.data.type==='launcher-sheet-hand'){{hand=Boolean(event.data.value);dragging=false;cursor()}}}});</script></body></html>'''
+        return page, rendered
+    finally:
+        styles_book.close()
+        values_book.close()
+
+
+def excel_sheet_preview(path: Path, sheet_index: int) -> dict:
+    """Build one sheet on demand; opening a book must not wait for every tab."""
+    cache_dir = excel_html_cache_dir(path)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    # v3 drops duplicated default inline styles.  A new cache version makes
+    # existing slow v2 pages harmless without deleting a user's cache.
+    output = cache_dir / f"sheet-{sheet_index + 1}-v6.html"
+    metadata_path = cache_dir / f"sheet-{sheet_index + 1}-v6.json"
+    metadata = None
+    if output.exists() and metadata_path.exists():
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            metadata = None
+    if metadata is None:
+        page, metadata = excel_sheet_html(path, sheet_index)
+        output.write_text(page, encoding="utf-8")
+        metadata_path.write_text(json.dumps(metadata, ensure_ascii=False), encoding="utf-8")
+    return {
+        "index": sheet_index,
+        "url": f"/cache/excel/html/{cache_dir.name}/{output.name}",
+        **metadata,
+    }
+
+
+def excel_thumbnail_preview(path: Path) -> str:
+    """Build a visual card from the exact same HTML sheet as the large view.
+
+    A workbook must have one visual source of truth.  The former thumbnail
+    constructed a second, simplified table with its own font and row rules;
+    it could therefore disagree with the readable sheet.  The card is now a
+    scaled viewport of the cached HTML sheet used by the full viewer.
+    """
+    if openpyxl is None:
+        raise RuntimeError("Для HTML-просмотра Excel нужен пакет openpyxl")
+    # The rail already places this page in a scaled, clipped iframe.  Returning
+    # the sheet directly means its geometry, fonts and initial position are
+    # exactly the same in the card and in the large viewer.
+    return excel_sheet_preview(path, 0)["url"]
+
+
+def excel_workbook_preview(path: Path) -> dict:
+    if not path.exists() or not path.is_file():
+        raise FileNotFoundError(f"Excel-файл не найден: {path}")
+    if not is_excel_file(path):
+        raise ValueError(f"Это не Excel-файл: {path}")
+    if openpyxl is None:
+        raise RuntimeError("Для HTML-просмотра Excel нужен пакет openpyxl")
+    if path.suffix.casefold() not in {".xlsx", ".xlsm"}:
+        raise ValueError("HTML-просмотр пока поддерживает XLSX/XLSM. Откройте XLS в Excel.")
+
+    book = openpyxl.load_workbook(path, read_only=True, data_only=False)
+    try:
+        sheet_names = book.sheetnames
+    finally:
+        book.close()
+
+    sheets = [{"index": index, "name": name} for index, name in enumerate(sheet_names)]
+    return {
+        "name": path.name,
+        "path": str(path),
+        "sheets": sheets,
+        "maxRows": MAX_XLSX_ROWS,
+        "cacheKey": excel_html_cache_dir(path).name,
+        "thumbnailUrl": excel_thumbnail_preview(path),
+    }
+
+
+def excel_to_pdf(path: Path) -> tuple[Path, bool]:
+    if not path.exists():
+        raise FileNotFoundError(f"Excel-файл не найден: {path}")
+    if not path.is_file() or not is_excel_file(path):
+        raise ValueError(f"Это не Excel-файл: {path}")
+    if not EXCEL_CONVERT_SCRIPT.exists():
+        raise RuntimeError(f"Скрипт конвертации Excel не найден: {EXCEL_CONVERT_SCRIPT}")
+
+    key = file_cache_key(path, "excel-pdf")
+    target_dir = EXCEL_CACHE_DIR / key
+    target_dir.mkdir(parents=True, exist_ok=True)
+    pdf_path = target_dir / f"{path.stem}.pdf"
+    manifest_path = target_dir / "manifest.json"
+
+    cached = False
+    if pdf_path.exists() and pdf_path.stat().st_size > 0 and manifest_path.exists():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            cached = (
+                manifest.get("sourcePath") == str(path)
+                and manifest.get("cacheKey") == key
+                and manifest.get("sourceMtimeNs") == path.stat().st_mtime_ns
+                and manifest.get("sourceSize") == path.stat().st_size
+            )
+        except (OSError, json.JSONDecodeError):
+            cached = False
+
+    if cached:
+        return pdf_path, True
+
+    if pdf_path.exists():
+        pdf_path.unlink()
+
+    process = subprocess.run(
+        [
+            "powershell",
+            "-STA",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(EXCEL_CONVERT_SCRIPT),
+            "-InputPath",
+            str(path),
+            "-OutputPath",
+            str(pdf_path),
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=EXCEL_CONVERT_TIMEOUT_SECONDS,
+    )
+    if process.returncode != 0:
+        message = process.stderr.strip() or process.stdout.strip() or "Excel не смог экспортировать книгу в PDF"
+        raise RuntimeError(message)
+    if not pdf_path.exists() or pdf_path.stat().st_size <= 0:
+        raise RuntimeError("Excel не создал PDF для preview")
+
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "sourcePath": str(path),
+                "sourceName": path.name,
+                "sourceMtimeNs": path.stat().st_mtime_ns,
+                "sourceSize": path.stat().st_size,
+                "cacheKey": key,
+                "pdfPath": str(pdf_path),
+                "convertedAt": datetime.now().isoformat(timespec="seconds"),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    return pdf_path, False
+
+
+def render_excel(path: Path, dpi: int = DEFAULT_PDF_DPI) -> dict:
+    pdf_path, convert_cache_hit = excel_to_pdf(path)
     document = render_pdf(pdf_path, dpi=dpi)
     document["sourcePath"] = str(path)
     document["sourceName"] = path.name
@@ -597,6 +922,7 @@ class LauncherHandler(BaseHTTPRequestHandler):
                     "repoRoot": str(REPO_ROOT),
                     "runtime": str(RUNTIME_DIR),
                     "wordPreview": True,
+                    "excelPreview": True,
                 },
             )
             return
@@ -762,6 +1088,81 @@ class LauncherHandler(BaseHTTPRequestHandler):
                 if not raw_file:
                     raise ValueError("Не выбран Word-файл для отображения")
                 pdf_path, convert_cache_hit = word_to_pdf(Path(raw_file))
+                payload = render_pdf_page(pdf_path, page=page, dpi=dpi)
+                payload["sourcePath"] = raw_file
+                payload["sourceType"] = file_extension(Path(raw_file))
+                payload["convertedPdfPath"] = str(pdf_path)
+                payload["convertCacheHit"] = convert_cache_hit
+                self.send_json(HTTPStatus.OK, payload)
+            except (ValueError, FileNotFoundError, RuntimeError, OSError, subprocess.TimeoutExpired, json.JSONDecodeError) as error:
+                self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
+            return
+
+        if parsed.path == "/api/excel/workbook":
+            try:
+                body = self.read_json()
+                raw_file = str(body.get("file", "")).strip()
+                if not raw_file:
+                    raise ValueError("Не выбран Excel-файл для отображения")
+                self.send_json(HTTPStatus.OK, excel_workbook_preview(Path(raw_file)))
+            except (ValueError, FileNotFoundError, RuntimeError, OSError, json.JSONDecodeError) as error:
+                self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
+            return
+
+        if parsed.path == "/api/excel/sheet":
+            try:
+                body = self.read_json()
+                raw_file = str(body.get("file", "")).strip()
+                sheet_index = int(body.get("sheetIndex", 0))
+                sheet = excel_sheet_preview(Path(raw_file), sheet_index)
+                self.send_json(HTTPStatus.OK, sheet)
+            except (ValueError, IndexError, FileNotFoundError, RuntimeError, OSError, json.JSONDecodeError) as error:
+                self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
+            return
+
+        if parsed.path == "/api/excel/render":
+            try:
+                body = self.read_json()
+                raw_files = body.get("files", [])
+                dpi = int(body.get("dpi") or DEFAULT_PDF_DPI)
+                if dpi < 72 or dpi > 600:
+                    raise ValueError("DPI должен быть в диапазоне 72-600")
+                if not isinstance(raw_files, list) or not raw_files:
+                    raise ValueError("Не выбраны Excel-файлы для отображения")
+                if len(raw_files) > 10:
+                    raise ValueError("За один раз пока можно отрендерить не больше 10 Excel-файлов")
+                documents = [render_excel(Path(str(file_path)), dpi=dpi) for file_path in raw_files]
+                document_errors = [
+                    {"document": document["name"], "path": document["path"], **error}
+                    for document in documents
+                    for error in document.get("errors", [])
+                ]
+                self.send_json(
+                    HTTPStatus.OK,
+                    {
+                        "dpi": dpi,
+                        "documents": documents,
+                        "totalPages": sum(document["pages"] for document in documents),
+                        "renderedPages": sum(document["renderedPages"] for document in documents),
+                        "errors": document_errors,
+                        "renderedAt": datetime.now().isoformat(timespec="seconds"),
+                    },
+                )
+            except (ValueError, FileNotFoundError, RuntimeError, OSError, subprocess.TimeoutExpired, json.JSONDecodeError) as error:
+                self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
+            return
+
+        if parsed.path == "/api/excel/page":
+            try:
+                body = self.read_json()
+                raw_file = str(body.get("file", "")).strip()
+                page = int(body.get("page") or 1)
+                dpi = int(body.get("dpi") or DEFAULT_PDF_DPI)
+                if dpi < 72 or dpi > 600:
+                    raise ValueError("DPI должен быть в диапазоне 72-600")
+                if not raw_file:
+                    raise ValueError("Не выбран Excel-файл для отображения")
+                pdf_path, convert_cache_hit = excel_to_pdf(Path(raw_file))
                 payload = render_pdf_page(pdf_path, page=page, dpi=dpi)
                 payload["sourcePath"] = raw_file
                 payload["sourceType"] = file_extension(Path(raw_file))

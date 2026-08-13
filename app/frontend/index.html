@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>F-Engineering Launcher v3</title>
-  <link rel="stylesheet" href="styles.css?v=20260812-21">
+  <link rel="stylesheet" href="styles.css?v=20260813-02">
 </head>
 <body>
   <main class="shell">
@@ -47,6 +47,15 @@
           <div class="viewer-empty" id="viewerEmpty"></div>
           <div class="quality-badge" id="qualityBadge" hidden>Обзор 150 DPI</div>
           <img id="pdfPageImage" alt="" hidden>
+          <section class="excel-viewer" id="excelViewer" hidden aria-label="Просмотр Excel-книги">
+            <div class="excel-book-title" id="excelBookTitle" title=""></div>
+            <div class="excel-tabs-bar">
+              <button class="excel-tabs-step" id="excelTabsLeft" type="button" title="Предыдущие вкладки">‹</button>
+              <div class="excel-tabs" id="excelTabs" aria-label="Листы Excel"></div>
+              <button class="excel-tabs-step" id="excelTabsRight" type="button" title="Следующие вкладки">›</button>
+            </div>
+            <iframe class="excel-sheet-frame" id="excelSheetFrame" title="Лист Excel" loading="lazy"></iframe>
+          </section>
           <div class="viewer-controls" id="viewerControls" hidden>
             <button id="viewZoomOut" type="button" title="Уменьшить">−</button>
             <button id="viewZoomIn" type="button" title="Увеличить">+</button>
@@ -69,6 +78,6 @@
       </div>
     </section>
   </main>
-  <script src="app.js?v=20260812-21"></script>
+  <script src="app.js?v=20260813-03"></script>
 </body>
 </html>
