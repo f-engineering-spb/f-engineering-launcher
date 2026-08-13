@@ -110,6 +110,9 @@ Excel is a read-only navigation surface, not a second Excel editor.
   Word previews, and Excel sheets.  It must retain zoom, `Вписать`, rotate,
   hand/arrow, and the three viewing modes.  Do not make a reduced Excel or
   Word variant.
+- The same panel must show a native-open action whenever an original file is
+  available: `Открыть PDF`, `Открыть DWG`, `Открыть Word`, or `Открыть Excel`.
+  Do not omit it for PDF/Word merely because their preview uses the PDF stage.
 - `Вписать` must always have enough fixed width for its full Russian label;
   it must never be clipped or wrapped because another format has a different
   panel layout.

@@ -1064,12 +1064,16 @@ function setActiveNativePath(path) {
   state.activeNativePath = path || "";
   els.openNativeFile.hidden = !state.activeNativePath;
   const lowerPath = state.activeNativePath.toLocaleLowerCase("ru");
-  if (lowerPath.endsWith(".dwg")) els.openNativeFile.textContent = "Открыть DWG";
+  if (lowerPath.endsWith(".pdf")) els.openNativeFile.textContent = "Открыть PDF";
+  else if (lowerPath.endsWith(".dwg")) els.openNativeFile.textContent = "Открыть DWG";
   else if (lowerPath.endsWith(".doc") || lowerPath.endsWith(".docx")) els.openNativeFile.textContent = "Открыть Word";
   else if (lowerPath.endsWith(".gdoc")) els.openNativeFile.textContent = "Открыть Google Docs";
   else if (lowerPath.endsWith(".xls") || lowerPath.endsWith(".xlsx") || lowerPath.endsWith(".xlsm")) els.openNativeFile.textContent = "Открыть Excel";
   else if (lowerPath.endsWith(".gsheet")) els.openNativeFile.textContent = "Открыть Google Sheets";
-  else els.openNativeFile.textContent = "Открыть";
+  else els.openNativeFile.textContent = "Открыть файл";
+  els.openNativeFile.title = state.activeNativePath
+    ? "Открыть исходный файл в программе Windows по умолчанию"
+    : "";
 }
 
 async function openActiveNativeFile() {
@@ -1147,7 +1151,10 @@ function showPdfPage(page) {
   }
   const highPage = state.highQualityPages.get(key);
   const displayPage = highPage || page;
-  setActiveNativePath(page.previewFor?.path || "");
+  // All document modes share one native-open control.  A PDF has no
+  // previewFor wrapper, while Word/DWG previews do, so always fall back to
+  // the real source/document path before hiding the action.
+  setActiveNativePath(page.previewFor?.path || page.sourcePath || page.documentPath || "");
   state.activePageUrl = displayPage.url;
   els.pdfPageImage.src = displayPage.url;
   els.pdfPageImage.hidden = false;
