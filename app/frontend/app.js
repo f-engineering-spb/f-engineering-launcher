@@ -15,6 +15,11 @@ const state = {
   activePageUrl: "",
   activePageKey: "",
   activeNativePath: "",
+  excelWorkbook: null,
+  excelWorkbooks: [],
+  excelWorkbookIndex: 0,
+  excelSheetIndex: 0,
+  excelScale: 1,
   highQualityPages: new Map(),
   pdfPairIndex: new Map(),
   viewMode: "standard",
@@ -59,6 +64,12 @@ const els = {
   pdfViewer: document.getElementById("pdfViewer"),
   pdfStage: document.getElementById("pdfStage"),
   pdfPageImage: document.getElementById("pdfPageImage"),
+  excelViewer: document.getElementById("excelViewer"),
+  excelBookTitle: document.getElementById("excelBookTitle"),
+  excelTabs: document.getElementById("excelTabs"),
+  excelTabsLeft: document.getElementById("excelTabsLeft"),
+  excelTabsRight: document.getElementById("excelTabsRight"),
+  excelSheetFrame: document.getElementById("excelSheetFrame"),
   viewerEmpty: document.getElementById("viewerEmpty"),
   viewerControls: document.getElementById("viewerControls"),
   qualityBadge: document.getElementById("qualityBadge"),
@@ -229,7 +240,22 @@ function stopProgress(cancelled = true, abortRequest = true) {
 
 function showOperationError(error) {
   if (error?.name === "AbortError") return;
-  finishProgress(`Ошибка: ${error.message || error}`);
+  // Never disguise a failed render as a completed 100% operation.  Keep the
+  // factual error on screen long enough for both the user and QA to see it.
+  if (state.progressTimer) clearInterval(state.progressTimer);
+  state.progressTimer = null;
+  state.operationController = null;
+  els.progressLabel.textContent = "Операция не выполнена";
+  els.progressDetail.textContent = `Ошибка: ${error.message || error}`;
+  els.progressValue.textContent = "Ошибка";
+  els.progressFill.style.width = "100%";
+  els.progressFill.classList.add("is-error");
+  setTimeout(() => {
+    if (!state.progressTimer) {
+      els.progressPanel.hidden = true;
+      els.progressFill.classList.remove("is-error");
+    }
+  }, 8000);
 }
 
 async function chooseFolderPath() {
@@ -660,7 +686,7 @@ function renderTreeNode(node, parent) {
 function renderFormats() {
   els.formatStrip.replaceChildren();
   const extensions = state.currentManifest?.statistics?.extensions || {};
-  const preferred = ["PDF", "DWG", "XLSX", "XLS", "DOCX", "DOC", "GDOC", "TXT", "PNG", "JPG", "JPEG", "PPTX", "SVG"];
+  const preferred = ["PDF", "DWG", "XLSX", "XLS", "XLSM", "GSHEET", "DOCX", "DOC", "GDOC", "TXT", "PNG", "JPG", "JPEG", "PPTX", "SVG"];
   const all = Object.keys(extensions).sort((a, b) => a.localeCompare(b, "ru"));
   const formats = [...new Set([...preferred.filter((ext) => ext in extensions), ...all])];
   if (!formats.length) {
@@ -775,6 +801,29 @@ function collectPreviewFilesForDisplay() {
         message: "Google Docs: локального Word-preview нет. Откройте документ в браузере.",
       });
     }
+    if (node.type === "file" && ["XLS", "XLSX", "XLSM"].includes(node.extension) && !directSourcePaths.has(node.path)) {
+      directSourcePaths.add(node.path);
+      result.push({
+        ...node,
+        previewType: "EXCEL",
+        previewFor: {
+          type: node.extension,
+          name: node.name,
+          path: node.path,
+        },
+      });
+    }
+    if (node.type === "file" && node.extension === "GSHEET" && !directSourcePaths.has(node.path)) {
+      directSourcePaths.add(node.path);
+      result.push({
+        type: "missing-preview",
+        name: node.name,
+        documentPath: node.path,
+        sourcePath: node.path,
+        sourceType: "GSHEET",
+        message: "Google Sheets: локального Excel-preview нет. Откройте таблицу в браузере.",
+      });
+    }
     if (node.type === "file" && node.extension === "DWG") {
       const pair = findPdfPairForDwg(node, pdfIndex);
       if (pair) {
@@ -814,7 +863,132 @@ function collectPreviewFilesForDisplay() {
   return result;
 }
 
+function clearExcelViewer() {
+  state.excelWorkbook = null;
+  state.excelWorkbooks = [];
+  state.excelWorkbookIndex = 0;
+  state.excelSheetIndex = 0;
+  state.excelScale = 1;
+  els.excelViewer.hidden = true;
+  els.excelBookTitle.textContent = "";
+  els.excelBookTitle.title = "";
+  els.excelTabs.replaceChildren();
+  els.excelSheetFrame.removeAttribute("src");
+}
+
+async function activateExcelSheet(index) {
+  const workbook = state.excelWorkbook;
+  const sheet = workbook?.sheets?.[index];
+  if (!sheet) return;
+  if (sheet.warming) await sheet.warming;
+  if (!sheet.url) {
+    const response = await fetch("/api/excel/sheet", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ file: workbook.path, sheetIndex: index }),
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || "Лист Excel не подготовлен");
+    Object.assign(sheet, payload);
+  }
+  state.excelSheetIndex = index;
+  [...els.excelTabs.querySelectorAll(".excel-tab")].forEach((tab) => {
+    tab.classList.toggle("active", Number(tab.dataset.sheetIndex) === index);
+  });
+  els.excelSheetFrame.src = sheet.url;
+}
+
+async function warmExcelWorkbook(workbook, activeIndex) {
+  // The first sheet is shown immediately.  The remaining tabs are prepared
+  // one by one in the background, so normal tab switches use only the cache.
+  for (let index = 0; index < (workbook.sheets || []).length; index += 1) {
+    if (index === activeIndex) continue;
+    const sheet = workbook.sheets[index];
+    if (!sheet || sheet.url || sheet.warming) continue;
+    sheet.warming = fetch("/api/excel/sheet", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ file: workbook.path, sheetIndex: index }),
+    })
+      .then(async (response) => {
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.error || "Excel sheet preparation failed");
+        Object.assign(sheet, payload);
+      })
+      .catch((error) => console.warn("Excel background sheet preparation failed", error))
+      .finally(() => { delete sheet.warming; });
+    await sheet.warming;
+  }
+}
+
+function renderExcelWorkbookRail() {
+  els.pdfThumbs.replaceChildren();
+  state.excelWorkbooks.forEach((workbook, index) => {
+    const thumb = document.createElement("button");
+    thumb.type = "button";
+    thumb.className = "pdf-thumb excel-book-thumb";
+    thumb.classList.toggle("active", index === state.excelWorkbookIndex);
+    thumb.title = workbook.name;
+    const preview = document.createElement("div");
+    preview.className = "excel-book-preview";
+    const frame = document.createElement("iframe");
+    frame.src = workbook.thumbnailUrl || "about:blank";
+    frame.title = `Миниатюра ${workbook.name}`;
+    frame.tabIndex = -1;
+    preview.append(frame);
+    const label = document.createElement("span");
+    label.textContent = workbook.name;
+    thumb.append(preview, label);
+    thumb.addEventListener("click", () => activateExcelWorkbook(index).catch(showOperationError));
+    els.pdfThumbs.append(thumb);
+  });
+}
+
+async function activateExcelWorkbook(index) {
+  const workbook = state.excelWorkbooks[index];
+  if (!workbook) return;
+  state.excelWorkbook = workbook;
+  state.excelWorkbookIndex = index;
+  state.excelSheetIndex = 0;
+  state.excelScale = 1;
+  els.excelBookTitle.textContent = workbook.name;
+  els.excelBookTitle.title = workbook.name;
+  renderExcelWorkbookRail();
+  els.pdfViewer.classList.remove("empty");
+  els.pdfPageImage.hidden = true;
+  els.pdfPageImage.removeAttribute("src");
+  els.viewerEmpty.hidden = true;
+  els.qualityBadge.hidden = true;
+  els.excelTabs.replaceChildren();
+  (workbook.sheets || []).forEach((sheet) => {
+    const tab = document.createElement("button");
+    tab.type = "button";
+    tab.className = "excel-tab";
+    tab.dataset.sheetIndex = String(sheet.index);
+    tab.title = `${sheet.name} · ${sheet.rows} строк · ${sheet.columns} столбцов`;
+    tab.textContent = sheet.name;
+    tab.addEventListener("click", () => activateExcelSheet(sheet.index).catch(showOperationError));
+    els.excelTabs.append(tab);
+  });
+  els.excelViewer.hidden = false;
+  els.viewerControls.hidden = false;
+  els.viewRotate.hidden = true;
+  els.viewPanMode.hidden = false;
+  setActiveNativePath(workbook.path);
+  updateViewTransform();
+  await activateExcelSheet(0);
+  window.setTimeout(() => warmExcelWorkbook(workbook, 0), 250);
+}
+
+async function showExcelWorkbooks(workbooks) {
+  state.excelWorkbooks = workbooks;
+  await activateExcelWorkbook(0);
+}
+
 function renderPdfViewer(pages) {
+  clearExcelViewer();
+  els.viewRotate.hidden = false;
+  els.viewPanMode.hidden = false;
   state.renderedPages = pages;
   els.pdfThumbs.replaceChildren();
   els.pdfViewer.classList.toggle("empty", !pages.length);
@@ -892,6 +1066,8 @@ function setActiveNativePath(path) {
   if (lowerPath.endsWith(".dwg")) els.openNativeFile.textContent = "Открыть DWG";
   else if (lowerPath.endsWith(".doc") || lowerPath.endsWith(".docx")) els.openNativeFile.textContent = "Открыть Word";
   else if (lowerPath.endsWith(".gdoc")) els.openNativeFile.textContent = "Открыть Google Docs";
+  else if (lowerPath.endsWith(".xls") || lowerPath.endsWith(".xlsx") || lowerPath.endsWith(".xlsm")) els.openNativeFile.textContent = "Открыть Excel";
+  else if (lowerPath.endsWith(".gsheet")) els.openNativeFile.textContent = "Открыть Google Sheets";
   else els.openNativeFile.textContent = "Открыть";
 }
 
@@ -922,8 +1098,8 @@ async function requestHighQualityPage(page) {
     setQualityBadge(`Качество ${PDF_QUALITY_DPI} DPI загружается…`, "loading");
   }
   try {
-    const endpoint = page.previewType === "WORD" ? "/api/word/page" : "/api/pdf/page";
-    const sourceFile = page.previewType === "WORD" ? page.previewFor?.path : page.documentPath;
+    const endpoint = page.previewType === "WORD" ? "/api/word/page" : page.previewType === "EXCEL" ? "/api/excel/page" : "/api/pdf/page";
+    const sourceFile = ["WORD", "EXCEL"].includes(page.previewType) ? page.previewFor?.path : page.documentPath;
     const response = await fetch(endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -999,9 +1175,16 @@ function updateViewTransform() {
   els.pdfStage.classList.toggle("pan-mode", view.panMode);
   els.pdfStage.classList.toggle("dragging", view.dragging);
   els.viewPanMode.classList.toggle("active", view.panMode);
+  if (state.excelWorkbook) {
+    els.excelSheetFrame.contentWindow?.postMessage({ type: "launcher-sheet-hand", value: view.panMode }, "*");
+  }
 }
 
 function fitPdfPage() {
+  if (state.excelWorkbook) {
+    els.excelSheetFrame.contentWindow?.postMessage({ type: "launcher-sheet-fit" }, "*");
+    return;
+  }
   if (!els.pdfPageImage.naturalWidth || !els.pdfPageImage.naturalHeight) return;
   const stage = els.pdfStage.getBoundingClientRect();
   const rotated = Math.abs(state.view.rotation % 180) === 90;
@@ -1018,6 +1201,11 @@ function fitPdfPage() {
 }
 
 function zoomPdf(factor) {
+  if (state.excelWorkbook) {
+    state.excelScale = Math.min(3, Math.max(0.35, state.excelScale * factor));
+    els.excelSheetFrame.contentWindow?.postMessage({ type: "launcher-sheet-zoom", value: state.excelScale }, "*");
+    return;
+  }
   if (els.pdfPageImage.hidden) return;
   state.view.scale = Math.min(8, Math.max(0.05, state.view.scale * factor));
   updateViewTransform();
@@ -1046,8 +1234,49 @@ const PDF_FETCH_TIMEOUT_MS = 90000;
 const PDF_PREVIEW_DPI = 150;
 const PDF_QUALITY_DPI = 300;
 
-async function renderSelectedPdfFiles() {
+async function renderExcelWorkbooks(excelFiles) {
+  setTreeBrowseMode(false);
+  setViewerMode("standard");
+  startProgress("Подготовка Excel", `${excelFiles.length} книг · HTML-просмотр без редактирования`);
+  const workbooks = [];
+  for (let index = 0; index < excelFiles.length; index += 1) {
+    const excelFile = excelFiles[index];
+    const controller = createOperationController();
+    const response = await fetch("/api/excel/workbook", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ file: excelFile.path }),
+      signal: controller.signal,
+    });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || `Excel-книга не подготовлена: ${excelFile.name}`);
+    workbooks.push(payload);
+    const percent = Math.round(((index + 1) / excelFiles.length) * 100);
+    els.progressValue.textContent = `${percent}%`;
+    els.progressFill.style.width = `${percent}%`;
+    els.progressDetail.textContent = `Книга ${index + 1} из ${excelFiles.length}: ${excelFile.name}`;
+  }
+  await showExcelWorkbooks(workbooks);
+  const sheets = workbooks.reduce((total, workbook) => total + (workbook.sheets?.length || 0), 0);
+  finishProgress(`${workbooks.length} книг · ${sheets} листов · лимит ${workbooks[0]?.maxRows || 2000} строк на лист`);
+}
+
+async function renderSelectedFiles() {
   const previewItems = collectPreviewFilesForDisplay();
+  const excelItems = previewItems.filter((item) => item.previewType === "EXCEL");
+  if (excelItems.length) {
+    if (previewItems.length !== excelItems.length) {
+      startProgress("Выберите файлы одного типа", "Excel-книги открываются отдельной лентой миниатюр.");
+      finishProgress("Отобразите Excel отдельно от PDF, DWG и Word.");
+      return;
+    }
+    await renderExcelWorkbooks(excelItems);
+    return;
+  }
+  await renderSelectedPdfFiles(previewItems);
+}
+
+async function renderSelectedPdfFiles(previewItems = collectPreviewFilesForDisplay()) {
   if (!previewItems.length) {
     startProgress("Превью не найдено", "Выберите PDF, DWG или Word.");
     finishProgress("Превью не найдено");
@@ -1084,7 +1313,7 @@ async function renderSelectedPdfFiles() {
       controller = new AbortController();
       state.operationControllers.push(controller);
       const timeoutId = setTimeout(() => controller.abort(), PDF_FETCH_TIMEOUT_MS);
-      const endpoint = batch[0]?.previewType === "WORD" ? "/api/word/render" : "/api/pdf/render";
+      const endpoint = batch[0]?.previewType === "WORD" ? "/api/word/render" : batch[0]?.previewType === "EXCEL" ? "/api/excel/render" : "/api/pdf/render";
       const response = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1099,6 +1328,16 @@ async function renderSelectedPdfFiles() {
           path: batch[0]?.path || "",
           error: payload.error || "PDF не отрендерен",
         });
+        if (batch[0]?.previewType === "EXCEL") {
+          pageGroups[batchIndex] = [{
+            type: "missing-preview",
+            name: batch[0]?.name || "Excel",
+            documentPath: batch[0]?.path || "",
+            sourcePath: batch[0]?.path || "",
+            sourceType: batch[0]?.extension || "EXCEL",
+            message: "Excel-preview сейчас недоступен. Откройте исходную книгу в Excel.",
+          }];
+        }
       } else {
         totalPages += payload.totalPages || 0;
         renderedPages += payload.renderedPages || 0;
@@ -1167,7 +1406,7 @@ els.refresh.addEventListener("click", () => {
   else importObject(true).catch(showOperationError);
 });
 els.display.addEventListener("click", () => {
-  if (inTreeMode()) renderSelectedPdfFiles().catch(showOperationError);
+  if (inTreeMode()) renderSelectedFiles().catch(showOperationError);
   else openSelectedObject().catch(showOperationError);
 });
 els.exclude.addEventListener("click", () => excludeSelectedObject().catch(showOperationError));
@@ -1183,6 +1422,21 @@ els.treeSearch.addEventListener("input", () => {
   renderTree();
 });
 els.pdfPageImage.addEventListener("load", () => fitPdfPage());
+els.excelSheetFrame.addEventListener("load", () => {
+  if (!state.excelWorkbook) return;
+  els.excelSheetFrame.contentWindow?.postMessage({ type: "launcher-sheet-zoom", value: state.excelScale }, "*");
+});
+els.excelTabsLeft.addEventListener("click", () => {
+  els.excelTabs.scrollBy({ left: -Math.max(180, els.excelTabs.clientWidth * .72), behavior: "smooth" });
+});
+els.excelTabsRight.addEventListener("click", () => {
+  els.excelTabs.scrollBy({ left: Math.max(180, els.excelTabs.clientWidth * .72), behavior: "smooth" });
+});
+els.excelTabs.addEventListener("wheel", (event) => {
+  if (!event.shiftKey || !event.deltaY) return;
+  event.preventDefault();
+  els.excelTabs.scrollLeft += event.deltaY;
+}, { passive: false });
 els.viewZoomOut.addEventListener("click", () => zoomPdf(0.82));
 els.viewZoomIn.addEventListener("click", () => zoomPdf(1.22));
 els.viewFit.addEventListener("click", () => fitPdfPage());
@@ -1203,7 +1457,7 @@ els.viewFullMode.addEventListener("click", () => setViewerMode("full"));
 
 els.pdfStage.addEventListener("wheel", (event) => {
   if (event.target.closest(".viewer-controls")) return;
-  if (!event.ctrlKey || els.pdfPageImage.hidden) return;
+  if (!event.ctrlKey || (els.pdfPageImage.hidden && !state.excelWorkbook)) return;
   event.preventDefault();
   zoomPdf(event.deltaY < 0 ? 1.12 : 0.89);
 }, { passive: false });

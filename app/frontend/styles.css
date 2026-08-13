@@ -115,6 +115,8 @@ button:disabled { opacity: .45; cursor: default; }
   transition: width .16s linear;
 }
 
+.progress-track span.is-error { background: #b45757; }
+
 .progress-detail {
   overflow: hidden;
   color: var(--muted);
@@ -504,6 +506,13 @@ textarea {
   -webkit-user-select: none;
 }
 
+.excel-book-thumb span {
+  overflow: visible;
+  text-overflow: clip;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
 .pdf-stage {
   position: relative;
   min-width: 0;
@@ -526,6 +535,111 @@ textarea {
   will-change: transform;
   -webkit-user-drag: none;
   user-select: none;
+}
+
+.excel-viewer {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  min-width: 0;
+  min-height: 0;
+  background: var(--paper);
+  user-select: none;
+}
+
+.excel-book-title {
+  min-width: 0;
+  padding: 8px 12px;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--line);
+  background: rgba(255, 255, 255, .94);
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.25;
+  white-space: nowrap;
+}
+
+.excel-tabs-bar {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) 28px;
+  align-items: stretch;
+  border-bottom: 1px solid var(--line);
+  background: rgba(241, 245, 247, .9);
+}
+
+.excel-tabs {
+  display: flex;
+  min-width: 0;
+  gap: 4px;
+  overflow: auto hidden;
+  padding: 7px 10px;
+  scroll-behavior: smooth;
+}
+
+.excel-tabs-step {
+  min-width: 28px;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: rgba(241, 245, 247, .96);
+  color: var(--muted);
+  font-size: 20px;
+  line-height: 1;
+}
+
+.excel-tab {
+  flex: 0 0 auto;
+  min-height: 26px;
+  max-width: 220px;
+  padding: 0 10px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.excel-tab.active {
+  color: var(--text);
+  border-color: #94afbf;
+  background: var(--paper);
+}
+
+.excel-book-thumb {
+  text-align: left;
+}
+
+.excel-book-preview {
+  position: relative;
+  width: 100%;
+  height: 138px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  background: var(--paper);
+}
+
+.excel-book-preview iframe {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 560px;
+  height: 430px;
+  border: 0;
+  pointer-events: none;
+  transform: scale(.29);
+  transform-origin: 0 0;
+}
+
+.excel-sheet-frame {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  border: 0;
+  background: var(--paper);
 }
 
 .pdf-stage.pan-mode {
