@@ -39,7 +39,7 @@ This repository has been initialized as the clean v3 home for Launcher. Old loca
 
 ## Current accepted state
 
-As of 2026-08-12, Launcher v3 has a functioning local shell for:
+As of 2026-08-13, Launcher v3 has the following accepted blocks:
 
 - object import/update/exclude;
 - object tree and format filters;
@@ -48,7 +48,22 @@ As of 2026-08-12, Launcher v3 has a functioning local shell for:
 - active PDF page quality rendering at `300 DPI`;
 - cached PDF previews;
 - viewer controls for thumbnails, zoom, fit, rotate, pan, and view modes.
+- DWG/PDF pairing with a PDF visual preview for a DWG and native opening of the
+  original DWG through Windows;
+- Word preview for `.doc` / `.docx` through Word-to-PDF cache, plus native
+  opening and Google Docs shortcut handling;
+- Excel preview for normal `.xlsx` / `.xlsm` workbooks: visual workbook cards,
+  full file names, worksheet tabs, scrolling, zoom, hand panning, background
+  tab preparation and native Excel opening.
 
-The next direction is design polish and a universal preview layer for DWG, Word, Excel, and common image formats.
+The current next direction is ordinary regression testing on project folders,
+then image preview support (`JPG`, `PNG`, `TIFF`, `GIF`) and design polish.
 
-See `docs/HANDOFF_2026-08-12.md` before continuing development.
+Before continuing development, read:
+
+- `AGENTS.md`;
+- `docs/HANDOFF_2026-08-12.md`;
+- `docs/CHECKPOINT_2026-08-12_UI_PDF_ACCEPTED.md`;
+- `docs/CHECKPOINT_2026-08-12_DWG_ACCEPTED.md`;
+- `docs/CHECKPOINT_2026-08-12_VORTEX_WORD_ACCEPTED.md`;
+- `docs/CHECKPOINT_2026-08-13_VORTEX_EXCEL_ACCEPTED.md`.
