@@ -28,8 +28,11 @@ MANIFESTS_DIR = RUNTIME_DIR / "manifests"
 PDF_CACHE_DIR = RUNTIME_DIR / "cache" / "pdf"
 WORD_CACHE_DIR = RUNTIME_DIR / "cache" / "word"
 EXCEL_CACHE_DIR = RUNTIME_DIR / "cache" / "excel"
+DWG_CACHE_DIR = RUNTIME_DIR / "cache" / "dwg"
 WORD_CONVERT_SCRIPT = REPO_ROOT / "scripts" / "convert_word_to_pdf.ps1"
 EXCEL_CONVERT_SCRIPT = REPO_ROOT / "scripts" / "convert_excel_to_pdf.ps1"
+DWG_RENDER_SCRIPT = REPO_ROOT / "scripts" / "render_dwg_model_space.ps1"
+DWG_REVIEW_OPEN_SCRIPT = REPO_ROOT / "scripts" / "open_dwg_review_copy.ps1"
 VERSION = "0.4.0-v3-pdf-render"
 SKIP_DIR_NAMES = {".git", "__pycache__", "node_modules", ".venv", "venv"}
 DEFAULT_PDF_DPI = 300
@@ -37,6 +40,9 @@ PDF_PAGE_TIMEOUT_SECONDS = 25
 PDF_DOCUMENT_TIMEOUT_SECONDS = 75
 WORD_CONVERT_TIMEOUT_SECONDS = 120
 EXCEL_CONVERT_TIMEOUT_SECONDS = 180
+DWG_RENDER_TIMEOUT_SECONDS = 180
+DWG_MODEL_PAGE_TIMEOUT_SECONDS = 75
+DWG_OPEN_TIMEOUT_SECONDS = 60
 MAX_XLSX_ROWS = 2000
 MAX_XLSX_COLS = 100
 POPPLER_BIN_DIR = (
@@ -401,6 +407,122 @@ def render_word(path: Path, dpi: int = DEFAULT_PDF_DPI) -> dict:
     return document
 
 
+def dwg_to_model_pdf(path: Path) -> tuple[Path, bool]:
+    """Create a cached read-only Model Space overview through installed ZWCAD.
+
+    This intentionally produces an overview, not editable CAD geometry and not
+    a substitute for sheets/layouts.  The source DWG is only opened read-only.
+    """
+    if not path.exists():
+        raise FileNotFoundError(f"DWG-файл не найден: {path}")
+    if not path.is_file() or path.suffix.casefold() != ".dwg":
+        raise ValueError(f"Это не DWG-файл: {path}")
+    if not DWG_RENDER_SCRIPT.exists():
+        raise RuntimeError(f"Скрипт рендера DWG не найден: {DWG_RENDER_SCRIPT}")
+
+    key = file_cache_key(path, "dwg-model-a0-v1")
+    target_dir = DWG_CACHE_DIR / key
+    target_dir.mkdir(parents=True, exist_ok=True)
+    pdf_path = target_dir / "model-space-a0.pdf"
+    manifest_path = target_dir / "manifest.json"
+    if pdf_path.exists() and pdf_path.stat().st_size > 1024 and manifest_path.exists():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if (
+                manifest.get("sourcePath") == str(path)
+                and manifest.get("cacheKey") == key
+                and manifest.get("sourceMtimeNs") == path.stat().st_mtime_ns
+                and manifest.get("sourceSize") == path.stat().st_size
+            ):
+                return pdf_path, True
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    if pdf_path.exists():
+        pdf_path.unlink()
+    process = subprocess.run(
+        [
+            "powershell",
+            "-STA",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(DWG_RENDER_SCRIPT),
+            "-InputPath",
+            str(path),
+            "-OutputPath",
+            str(pdf_path),
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=DWG_RENDER_TIMEOUT_SECONDS,
+    )
+    if process.returncode != 0:
+        message = process.stderr.strip() or process.stdout.strip() or "ZWCAD не смог создать Model Space preview"
+        raise RuntimeError(message)
+    if not pdf_path.exists() or pdf_path.stat().st_size <= 1024:
+        raise RuntimeError("ZWCAD не создал PDF Model Space для preview")
+
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "sourcePath": str(path),
+                "sourceName": path.name,
+                "sourceMtimeNs": path.stat().st_mtime_ns,
+                "sourceSize": path.stat().st_size,
+                "cacheKey": key,
+                "pdfPath": str(pdf_path),
+                "mode": "model-space-a0-extents-no-lineweights",
+                "renderedAt": datetime.now().isoformat(timespec="seconds"),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    return pdf_path, False
+
+
+def render_dwg_model(path: Path, dpi: int = DEFAULT_PDF_DPI) -> dict:
+    pdf_path, convert_cache_hit = dwg_to_model_pdf(path)
+    document = render_pdf(pdf_path, dpi=dpi, page_timeout_seconds=DWG_MODEL_PAGE_TIMEOUT_SECONDS)
+    document["name"] = path.name
+    document["sourcePath"] = str(path)
+    document["sourceName"] = path.name
+    document["sourceType"] = "DWG"
+    document["convertedPdfPath"] = str(pdf_path)
+    document["convertCacheHit"] = convert_cache_hit
+    document["previewMode"] = "model-space-a0"
+    return document
+
+
+def open_dwg_for_review(path: Path) -> Path:
+    """Open the original DWG through the registered Windows application.
+
+    ZWCAD COM automation creates hidden ``/Automation`` instances which can
+    hang while a drawing is opening from Google Drive.  ShellExecute follows
+    the same association and DDE path as a user double-click in Explorer.
+    """
+    if not path.exists() or not path.is_file():
+        raise FileNotFoundError(f"DWG-файл не найден: {path}")
+    if os.name == "nt":
+        os.startfile(str(path))  # type: ignore[attr-defined]
+    else:
+        subprocess.Popen(["xdg-open", str(path)])
+    return path
+
+
+def append_native_open_log(event: dict) -> None:
+    """Write one UTF-8 diagnostic record for a native-open attempt."""
+    logs_dir = RUNTIME_DIR / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    with (logs_dir / "native-open.jsonl").open("a", encoding="utf-8") as log:
+        log.write(json.dumps(event, ensure_ascii=False) + "\n")
+
+
 def excel_html_cache_dir(path: Path) -> Path:
     """Return an immutable cache location for one exact workbook revision."""
     return EXCEL_CACHE_DIR / "html" / file_cache_key(path, "excel-html")
@@ -493,7 +615,7 @@ def excel_sheet_html(path: Path, sheet_index: int) -> tuple[str, dict]:
                 # so fast first paint has priority over reproducing every
                 # individual spreadsheet border colour.
                 if cell.font.bold:
-                    css.append("font-weight:700")
+                    css.append("font-weight:500")
                 if cell.font.italic:
                     css.append("font-style:italic")
                 # Defaults are already declared once in the HTML stylesheet.
@@ -546,7 +668,7 @@ table{{border-collapse:collapse;table-layout:fixed;width:{table_width}px}}col.ro
 th,td{{box-sizing:border-box;border:1px solid #cbd5dc;padding:2px 4px;vertical-align:top;white-space:pre-wrap;overflow-wrap:break-word}}
 th{{position:sticky;left:0;z-index:1;background:#f1f5f7;color:#657687;font:10px "Segoe UI",Arial,sans-serif;text-align:right}}td{{overflow:hidden}}
 </style></head><body><div id="sheet-canvas"><div id="sheet"><table><colgroup>{cols}</colgroup><tbody>{''.join(rows)}</tbody></table></div></div>
-<script>const canvas=document.getElementById('sheet-canvas'),sheet=document.getElementById('sheet');let width=0,height=0,padding=0,scale=1,hand=true,dragging=false,startX=0,startY=0,startLeft=0,startTop=0;function zoom(value){{if(!width){{width=sheet.offsetWidth;height=sheet.offsetHeight}}scale=Math.max(.35,Math.min(3,value));padding=Math.max(innerWidth,innerHeight);canvas.style.width=(width*scale+padding*2)+'px';canvas.style.height=(height*scale+padding*2)+'px';sheet.style.transform='translate('+padding+'px,'+padding+'px) scale('+scale+')'}}function fit(){{if(!width)zoom(1);const value=Math.min(1,(innerWidth-48)/width,(innerHeight-48)/height);zoom(value);requestAnimationFrame(()=>{{scrollTo(padding,padding);parent.postMessage({{type:'launcher-sheet-fitted',value:scale}},'*')}})}}function cursor(){{document.body.style.cursor=hand?(dragging?'grabbing':'grab'):'default'}}addEventListener('load',()=>{{zoom(1);cursor();requestAnimationFrame(()=>scrollTo(padding,padding))}});addEventListener('wheel',event=>{{if(!event.ctrlKey)return;event.preventDefault();zoom(scale*(event.deltaY<0?1.12:.89))}},{{passive:false}});addEventListener('pointerdown',event=>{{if(!hand||event.button!==0)return;dragging=true;startX=event.clientX;startY=event.clientY;startLeft=scrollX;startTop=scrollY;document.body.setPointerCapture?.(event.pointerId);cursor();event.preventDefault()}});addEventListener('pointermove',event=>{{if(!dragging)return;scrollTo(startLeft-(event.clientX-startX),startTop-(event.clientY-startY))}});addEventListener('pointerup',event=>{{if(!dragging)return;dragging=false;document.body.releasePointerCapture?.(event.pointerId);cursor()}});addEventListener('pointercancel',()=>{{dragging=false;cursor()}});addEventListener('message',event=>{{if(!event.data)return;if(event.data.type==='launcher-sheet-zoom')zoom(event.data.value);if(event.data.type==='launcher-sheet-fit')fit();if(event.data.type==='launcher-sheet-hand'){{hand=Boolean(event.data.value);dragging=false;cursor()}}}});</script></body></html>'''
+<script>const canvas=document.getElementById('sheet-canvas'),sheet=document.getElementById('sheet');let width=0,height=0,padding=0,scale=1,rotation=0,hand=true,dragging=false,startX=0,startY=0,startLeft=0,startTop=0;function dimensions(){{return Math.abs(rotation%180)===90?{{width:height,height:width}}:{{width,height}}}}function zoom(value){{if(!width){{width=sheet.offsetWidth;height=sheet.offsetHeight}}scale=Math.max(.35,Math.min(3,value));padding=Math.max(innerWidth,innerHeight);const size=dimensions();canvas.style.width=(size.width*scale+padding*2)+'px';canvas.style.height=(size.height*scale+padding*2)+'px';sheet.style.transform='translate('+padding+'px,'+padding+'px) rotate('+rotation+'deg) scale('+scale+')'}}function fit(){{if(!width)zoom(1);const size=dimensions(),value=Math.min(1,(innerWidth-48)/size.width,(innerHeight-48)/size.height);zoom(value);requestAnimationFrame(()=>{{scrollTo(padding,padding);parent.postMessage({{type:'launcher-sheet-fitted',value:scale}},'*')}})}}function cursor(){{document.body.style.cursor=hand?(dragging?'grabbing':'grab'):'default'}}addEventListener('load',()=>{{zoom(1);cursor();requestAnimationFrame(()=>scrollTo(padding,padding))}});addEventListener('wheel',event=>{{if(!event.ctrlKey)return;event.preventDefault();zoom(scale*(event.deltaY<0?1.12:.89))}},{{passive:false}});addEventListener('pointerdown',event=>{{if(!hand||event.button!==0)return;dragging=true;startX=event.clientX;startY=event.clientY;startLeft=scrollX;startTop=scrollY;document.body.setPointerCapture?.(event.pointerId);cursor();event.preventDefault()}});addEventListener('pointermove',event=>{{if(!dragging)return;scrollTo(startLeft-(event.clientX-startX),startTop-(event.clientY-startY))}});addEventListener('pointerup',event=>{{if(!dragging)return;dragging=false;document.body.releasePointerCapture?.(event.pointerId);cursor()}});addEventListener('pointercancel',()=>{{dragging=false;cursor()}});addEventListener('message',event=>{{if(!event.data)return;if(event.data.type==='launcher-sheet-zoom')zoom(event.data.value);if(event.data.type==='launcher-sheet-fit')fit();if(event.data.type==='launcher-sheet-rotate'){{rotation=((Number(event.data.value)||0)%360+360)%360;zoom(scale)}}if(event.data.type==='launcher-sheet-hand'){{hand=Boolean(event.data.value);dragging=false;cursor()}}}});</script></body></html>'''
         return page, rendered
     finally:
         styles_book.close()
@@ -557,10 +679,10 @@ def excel_sheet_preview(path: Path, sheet_index: int) -> dict:
     """Build one sheet on demand; opening a book must not wait for every tab."""
     cache_dir = excel_html_cache_dir(path)
     cache_dir.mkdir(parents=True, exist_ok=True)
-    # v3 drops duplicated default inline styles.  A new cache version makes
-    # existing slow v2 pages harmless without deleting a user's cache.
-    output = cache_dir / f"sheet-{sheet_index + 1}-v6.html"
-    metadata_path = cache_dir / f"sheet-{sheet_index + 1}-v6.json"
+    # A new cache version makes existing pages harmless without deleting a
+    # user's cache, including the viewer controls embedded in this HTML.
+    output = cache_dir / f"sheet-{sheet_index + 1}-v8.html"
+    metadata_path = cache_dir / f"sheet-{sheet_index + 1}-v8.json"
     metadata = None
     if output.exists() and metadata_path.exists():
         try:
@@ -710,7 +832,7 @@ def render_excel(path: Path, dpi: int = DEFAULT_PDF_DPI) -> dict:
     return document
 
 
-def render_pdf(path: Path, dpi: int = DEFAULT_PDF_DPI) -> dict:
+def render_pdf(path: Path, dpi: int = DEFAULT_PDF_DPI, page_timeout_seconds: int = PDF_PAGE_TIMEOUT_SECONDS) -> dict:
     if not path.exists():
         raise FileNotFoundError(f"PDF не найден: {path}")
     if not path.is_file() or path.suffix.casefold() != ".pdf":
@@ -777,7 +899,7 @@ def render_pdf(path: Path, dpi: int = DEFAULT_PDF_DPI) -> dict:
                         str(path),
                         str(prefix),
                     ],
-                    timeout=PDF_PAGE_TIMEOUT_SECONDS,
+                        timeout=page_timeout_seconds,
                 )
                 candidate = target_dir / f"page-{page}.png"
                 if result.returncode != 0:
@@ -786,7 +908,7 @@ def render_pdf(path: Path, dpi: int = DEFAULT_PDF_DPI) -> dict:
                     raise RuntimeError("pdftoppm не создал PNG страницы")
                 rendered_count += 1
             except subprocess.TimeoutExpired:
-                errors.append({"page": page, "error": f"Таймаут рендера страницы {page}: {PDF_PAGE_TIMEOUT_SECONDS} сек."})
+                errors.append({"page": page, "error": f"Таймаут рендера страницы {page}: {page_timeout_seconds} сек."})
                 continue
             except (RuntimeError, OSError) as error:
                 errors.append({"page": page, "error": str(error)})
@@ -819,7 +941,7 @@ def render_pdf(path: Path, dpi: int = DEFAULT_PDF_DPI) -> dict:
     }
 
 
-def render_pdf_page(path: Path, page: int, dpi: int = DEFAULT_PDF_DPI) -> dict:
+def render_pdf_page(path: Path, page: int, dpi: int = DEFAULT_PDF_DPI, page_timeout_seconds: int = PDF_PAGE_TIMEOUT_SECONDS) -> dict:
     if not path.exists():
         raise FileNotFoundError(f"PDF не найден: {path}")
     if not path.is_file() or path.suffix.casefold() != ".pdf":
@@ -858,10 +980,10 @@ def render_pdf_page(path: Path, page: int, dpi: int = DEFAULT_PDF_DPI) -> dict:
                     str(path),
                     str(prefix),
                 ],
-                timeout=PDF_PAGE_TIMEOUT_SECONDS,
+                timeout=page_timeout_seconds,
             )
         except subprocess.TimeoutExpired as error:
-            raise RuntimeError(f"Таймаут рендера страницы {page}: {PDF_PAGE_TIMEOUT_SECONDS} сек.") from error
+            raise RuntimeError(f"Таймаут рендера страницы {page}: {page_timeout_seconds} сек.") from error
         if result.returncode != 0:
             raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "pdftoppm не смог отрендерить страницу")
     if not png.exists() or png.stat().st_size <= 0:
@@ -1098,6 +1220,59 @@ class LauncherHandler(BaseHTTPRequestHandler):
                 self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
             return
 
+        if parsed.path == "/api/dwg/model-render":
+            try:
+                body = self.read_json()
+                raw_files = body.get("files", [])
+                dpi = int(body.get("dpi") or DEFAULT_PDF_DPI)
+                if dpi < 72 or dpi > 600:
+                    raise ValueError("DPI должен быть в диапазоне 72-600")
+                if not isinstance(raw_files, list) or not raw_files:
+                    raise ValueError("Не выбраны DWG-файлы для отображения")
+                if len(raw_files) > 1:
+                    raise ValueError("Model Space preview пока создаётся по одному DWG-файлу")
+                documents = [render_dwg_model(Path(str(file_path)), dpi=dpi) for file_path in raw_files]
+                document_errors = [
+                    {"document": document["name"], "path": document["path"], **error}
+                    for document in documents
+                    for error in document.get("errors", [])
+                ]
+                self.send_json(
+                    HTTPStatus.OK,
+                    {
+                        "dpi": dpi,
+                        "documents": documents,
+                        "totalPages": sum(document["pages"] for document in documents),
+                        "renderedPages": sum(document["renderedPages"] for document in documents),
+                        "errors": document_errors,
+                        "renderedAt": datetime.now().isoformat(timespec="seconds"),
+                    },
+                )
+            except (ValueError, FileNotFoundError, RuntimeError, OSError, subprocess.TimeoutExpired, json.JSONDecodeError) as error:
+                self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
+            return
+
+        if parsed.path == "/api/dwg/model-page":
+            try:
+                body = self.read_json()
+                raw_file = str(body.get("file", "")).strip()
+                page = int(body.get("page") or 1)
+                dpi = int(body.get("dpi") or DEFAULT_PDF_DPI)
+                if dpi < 72 or dpi > 600:
+                    raise ValueError("DPI должен быть в диапазоне 72-600")
+                if not raw_file:
+                    raise ValueError("Не выбран DWG-файл для отображения")
+                pdf_path, convert_cache_hit = dwg_to_model_pdf(Path(raw_file))
+                payload = render_pdf_page(pdf_path, page=page, dpi=dpi, page_timeout_seconds=DWG_MODEL_PAGE_TIMEOUT_SECONDS)
+                payload["sourcePath"] = raw_file
+                payload["sourceType"] = "DWG"
+                payload["convertedPdfPath"] = str(pdf_path)
+                payload["convertCacheHit"] = convert_cache_hit
+                self.send_json(HTTPStatus.OK, payload)
+            except (ValueError, FileNotFoundError, RuntimeError, OSError, subprocess.TimeoutExpired, json.JSONDecodeError) as error:
+                self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
+            return
+
         if parsed.path == "/api/excel/workbook":
             try:
                 body = self.read_json()
@@ -1174,6 +1349,9 @@ class LauncherHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/open-file":
+            started = time.perf_counter()
+            raw_file = ""
+            target: Path | None = None
             try:
                 body = self.read_json()
                 raw_file = str(body.get("path", "")).strip()
@@ -1182,12 +1360,46 @@ class LauncherHandler(BaseHTTPRequestHandler):
                 target = Path(raw_file).expanduser()
                 if not target.exists() or not target.is_file():
                     raise FileNotFoundError(f"Файл не найден: {target}")
+                opened_path = target
                 if os.name == "nt":
-                    os.startfile(str(target))  # type: ignore[attr-defined]
+                    if target.suffix.casefold() == ".dwg":
+                        opened_path = open_dwg_for_review(target)
+                    else:
+                        os.startfile(str(target))  # type: ignore[attr-defined]
                 else:
                     subprocess.Popen(["xdg-open", str(target)])
-                self.send_json(HTTPStatus.OK, {"ok": True, "path": str(target)})
-            except (ValueError, FileNotFoundError, OSError, json.JSONDecodeError) as error:
+                mode = "read-only-source" if target.suffix.casefold() == ".dwg" else "native"
+                append_native_open_log(
+                    {
+                        "at": datetime.now().isoformat(timespec="seconds"),
+                        "status": "requested",
+                        "extension": target.suffix.casefold(),
+                        "sourcePath": str(target),
+                        "openedPath": str(opened_path),
+                        "mode": mode,
+                        "elapsedMs": round((time.perf_counter() - started) * 1000),
+                    }
+                )
+                self.send_json(
+                    HTTPStatus.OK,
+                    {
+                        "ok": True,
+                        "path": str(target),
+                        "openedPath": str(opened_path) if target.suffix.casefold() == ".dwg" else str(target),
+                        "mode": mode,
+                    },
+                )
+            except (ValueError, FileNotFoundError, OSError, RuntimeError, subprocess.TimeoutExpired, json.JSONDecodeError) as error:
+                append_native_open_log(
+                    {
+                        "at": datetime.now().isoformat(timespec="seconds"),
+                        "status": "error",
+                        "extension": target.suffix.casefold() if target else Path(raw_file).suffix.casefold(),
+                        "sourcePath": str(target) if target else raw_file,
+                        "error": str(error),
+                        "elapsedMs": round((time.perf_counter() - started) * 1000),
+                    }
+                )
                 self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
             return
 

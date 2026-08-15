@@ -210,7 +210,7 @@ textarea {
 
 .object-row strong {
   display: block;
-  overflow: hidden;
+  overflow: visible;
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 11px;
@@ -266,11 +266,13 @@ textarea {
 }
 
 .format-chip {
-  min-height: 20px;
-  padding: 0 6px;
+  min-height: 18px;
+  padding: 0 7px;
   border-color: var(--line-strong);
+  border-radius: 6px;
   font-size: 10px;
   font-weight: 430;
+  line-height: 16px;
 }
 
 .format-chip.active {
@@ -305,7 +307,45 @@ textarea {
 }
 
 .tree-row.hidden { display: none; }
-.tree-row.folder { font-weight: 450; }
+
+.tree-row.folder {
+  min-height: 27px;
+  margin: 3px 3px 0;
+  padding: 3px 7px;
+  border-color: rgba(150, 171, 184, .48);
+  border-radius: 5px;
+  background: rgba(234, 241, 245, .74);
+  color: #263a47;
+  font-weight: 560;
+}
+
+.tree-row.folder:hover { background: rgba(220, 233, 240, .96); }
+
+.tree-row.folder.selected {
+  border-color: rgba(62, 105, 130, .66);
+  background: var(--active-strong);
+}
+
+.tree-row.file {
+  min-height: 22px;
+  color: #3e4a52;
+  font-weight: 400;
+}
+
+.tree-row.folder > :first-child {
+  color: #3f6c85;
+  font-size: 16px;
+  font-weight: 500;
+  line-height: 1;
+  text-align: center;
+}
+
+.tree-row.file > :first-child {
+  color: #8497a3;
+  font-size: 14px;
+  line-height: 1;
+  text-align: center;
+}
 
 .tree-name {
   overflow: hidden;
@@ -315,6 +355,18 @@ textarea {
 .tree-meta {
   color: var(--muted);
   font-size: 10.75px;
+}
+
+.tree-row.folder .tree-meta {
+  min-width: 18px;
+  padding: 1px 5px;
+  border: 1px solid rgba(137, 162, 177, .48);
+  border-radius: 9px;
+  background: rgba(255, 255, 255, .62);
+  color: #5a7384;
+  font-size: 10px;
+  line-height: 1.2;
+  text-align: center;
 }
 
 .pair-badge {
@@ -361,7 +413,34 @@ textarea {
   color: var(--ink);
 }
 
-.tree-children { margin-left: 16px; }
+.tree-children {
+  position: relative;
+  margin-left: 15px;
+  padding-left: 12px;
+  border-left: 1px solid rgba(142, 166, 181, .58);
+}
+
+.tree-children > .tree-row::before {
+  position: absolute;
+  top: 50%;
+  left: -13px;
+  width: 11px;
+  border-top: 1px solid rgba(142, 166, 181, .58);
+  content: "";
+}
+
+.tree-children > .tree-row {
+  margin-top: 3px;
+}
+
+.tree-children > .tree-row.folder {
+  margin-top: 6px;
+}
+
+.tree-children > .tree-row.file + .tree-row.folder {
+  margin-top: 3px;
+}
+
 .tree-children.collapsed { display: none; }
 
 .shell.tree-browse .viewer {
@@ -392,8 +471,18 @@ textarea {
 .shell.tree-browse .tree-row {
   grid-template-columns: 18px max-content auto;
   width: max-content;
-  min-width: 100%;
+  max-width: 100%;
   padding-right: 32px;
+}
+
+.shell.tree-browse .tree-row.folder {
+  width: fit-content;
+  max-width: min(760px, 100%);
+  padding-right: 7px;
+}
+
+.shell.tree-browse .tree-row.folder .copy-path-button {
+  right: -26px;
 }
 
 .shell.tree-browse .tree-name {
@@ -548,6 +637,13 @@ textarea {
   user-select: none;
 }
 
+/* The generic .excel-viewer display rule must not override the HTML hidden
+   state. Otherwise an inactive Excel layer remains above the PDF stage and
+   can cover a successfully rendered large PDF image. */
+.excel-viewer[hidden] {
+  display: none;
+}
+
 .excel-book-title {
   min-width: 0;
   padding: 8px 12px;
@@ -607,6 +703,7 @@ textarea {
   border-color: #94afbf;
   background: var(--paper);
 }
+
 
 .excel-book-thumb {
   text-align: left;
@@ -682,14 +779,19 @@ textarea {
   font-weight: 500;
 }
 
+#viewFit {
+  min-width: 70px;
+  white-space: nowrap;
+}
+
 .hand-icon {
   display: block;
-  width: 18px;
-  height: 18px;
+  width: 17px;
+  height: 17px;
   margin: auto;
   fill: none;
   stroke: currentColor;
-  stroke-width: 1.7;
+  stroke-width: 1.25;
   stroke-linecap: round;
   stroke-linejoin: round;
 }
