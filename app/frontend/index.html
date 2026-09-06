@@ -1,17 +1,17 @@
-﻿<!doctype html>
+<!doctype html>
 <html lang="ru">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>F-Engineering Launcher v3</title>
-  <link rel="stylesheet" href="styles.css?v=20260813-02">
+  <link rel="stylesheet" href="styles.css?v=20260906-native-fix-05">
 </head>
 <body>
   <main class="shell">
     <aside class="sidebar" id="sidebar">
       <div class="action-grid" aria-label="Действия с объектом">
         <button id="loadObject" type="button" title="Добавить новый объект в Launcher. Исходная папка не переносится и не меняется.">Загрузить</button>
-        <button id="refreshObject" type="button" disabled title="Проверить выбранный объект заново и обновить его манифест. Позже здесь будет обновление только изменений.">Обновить</button>
+        <button id="refreshObject" type="button" disabled title="Проверить выбранный объект заново: сравнить с предыдущим сканом и показать добавленные, изменённые и удалённые файлы без потери контекста.">Обновить</button>
         <button id="displayObject" type="button" disabled title="Открыть выбранный объект: показать дерево, поиск и фильтры файлов.">Отобразить</button>
         <button id="excludeObject" type="button" disabled title="Убрать объект из списка Launcher. Исходная папка не удаляется.">Исключить</button>
       </div>
@@ -35,6 +35,8 @@
         </div>
         <input class="search-input" id="treeSearch" type="search" placeholder="Поиск: pdf, разрез, спецификация…" spellcheck="false">
         <div class="format-strip" id="formatStrip"></div>
+        <div class="diff-summary" id="diffSummary" hidden></div>
+        <button class="diff-filter-toggle" id="diffFilterToggle" type="button" hidden title="Показать только добавленные, изменённые и удалённые файлы">Изменения</button>
         <div class="selection-summary" id="selectionSummary">Выделение пустое</div>
         <div class="tree" id="objectTree"></div>
       </section>
@@ -69,7 +71,7 @@
                 <path d="M15.7 12V8.2a1.2 1.2 0 0 1 2.4 0v6.1c0 4-2.5 6.7-6.3 6.7h-.9c-2.2 0-3.7-.9-5-2.8L3.6 15a1.35 1.35 0 0 1 2.1-1.7l2.1 2.1" />
               </svg>
             </button>
-            <button id="openNativeFile" type="button" hidden title="Открыть исходный файл в программе Windows по умолчанию">Открыть DWG</button>
+            <button id="openNativeFile" type="button" hidden title="Открыть исходный файл в программе Windows по умолчанию">Открыть файл</button>
             <button id="viewStandardMode" type="button" title="Стандартный режим: левая панель, миниатюры и просмотр">▦</button>
             <button id="viewMediumMode" type="button" title="Средний режим: скрыть левую панель, оставить миниатюры">▤</button>
             <button id="viewFullMode" type="button" title="Полный просмотр: скрыть левую панель и миниатюры">▢</button>
@@ -78,6 +80,78 @@
       </div>
     </section>
   </main>
-  <script src="app.js?v=20260813-03"></script>
+
+  <!-- Модальное окно загрузки объекта -->
+  <div class="modal-backdrop" id="loadModal" hidden>
+    <div class="modal-card">
+      <div class="modal-header">
+        <div class="modal-title-row">
+          <span class="modal-icon">📁</span>
+          <div>
+            <h3 class="modal-title">Загрузить объект</h3>
+            <p class="modal-subtitle">Выберите проект для загрузки и анализа в Launcher v3</p>
+          </div>
+        </div>
+        <button class="modal-close" id="closeLoadModal" type="button" title="Закрыть (Esc)">✕</button>
+      </div>
+
+      <div class="modal-tabs">
+        <button class="modal-tab active" id="tabQuick" type="button">Быстрый выбор проектов</button>
+        <button class="modal-tab" id="tabBrowse" type="button">Проводник по папкам</button>
+        <button class="modal-tab" id="tabPath" type="button">Ввести путь вручную</button>
+      </div>
+
+      <!-- Вкладка 1: Быстрый выбор проектов -->
+      <div class="modal-pane active" id="paneQuick">
+        <div class="pane-description">Обнаруженные проекты на диске и Google Drive:</div>
+        <div class="quick-projects-list" id="quickProjectsList">
+          <div class="loading-spin">Поиск проектов…</div>
+        </div>
+      </div>
+
+      <!-- Вкладка 2: Проводник по папкам -->
+      <div class="modal-pane" id="paneBrowse">
+        <div class="drives-bar" id="drivesBar"></div>
+        <div class="browser-breadcrumbs" id="browserBreadcrumbs"></div>
+        <div class="browser-layout">
+          <div class="browser-folders-col">
+            <div class="col-header">Папки</div>
+            <div class="browser-folders-list" id="browserFoldersList"></div>
+          </div>
+          <div class="browser-preview-col">
+            <div class="col-header">Содержимое папки</div>
+            <div class="browser-stats" id="browserStats">Выберите папку</div>
+            <div class="browser-files-list" id="browserFilesList"></div>
+          </div>
+        </div>
+        <div class="browser-footer">
+          <button class="primary-btn" id="btnLoadBrowsedFolder" type="button">Загрузить эту папку в Launcher</button>
+          <button class="secondary-btn" id="btnOpenInWindowsExplorer" type="button" title="Открыть текущую папку в стандартном Проводнике Windows">Открыть в Проводнике Windows</button>
+        </div>
+      </div>
+
+      <!-- Вкладка 3: Ввести путь вручную -->
+      <div class="modal-pane" id="panePath">
+        <div class="pane-description">Укажите или вставьте путь к папке или файлу проекта:</div>
+        <div class="path-input-group">
+          <input class="manual-path-input" id="manualPathInput" type="text" placeholder="Например: H:\Общие диски\000_Объекты СПб\02_2026\03_ЖК МОД" spellcheck="false">
+          <button class="primary-btn" id="btnLoadManualPath" type="button">Загрузить</button>
+        </div>
+        <div class="system-picker-box">
+          <div class="system-picker-header">Диалог проводника Windows:</div>
+          <p class="system-picker-text">Можно вызвать стандартное окно выбора файлов Windows:</p>
+          <button class="secondary-btn" id="btnTriggerSystemPicker" type="button">Открыть диалог выбора файлов Windows</button>
+          <div class="system-picker-status" id="systemPickerStatus" hidden></div>
+        </div>
+      </div>
+
+      <!-- Зона Drag & Drop -->
+      <div class="drop-zone" id="modalDropZone">
+        <span>📁 Или перетащите папку из Проводника Windows прямо сюда</span>
+      </div>
+    </div>
+  </div>
+
+    <script src="app.js?v=20260906-native-fix-05"></script>
 </body>
 </html>

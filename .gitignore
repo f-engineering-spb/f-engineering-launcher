@@ -18,6 +18,12 @@ runtime/bench/**
 !runtime/manifests/.gitkeep
 !runtime/logs/.gitkeep
 
+# DWG render probe artifacts and stray test drawings
+runtime/dwg-probe/
+*.dwg.tmp
+# Loose test DWG in repo root (12 MB probe) — not source
+/да.dwg
+
 # Generated previews and exports
 renders/
 output/
