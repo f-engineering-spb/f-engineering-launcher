@@ -36,6 +36,20 @@ Launcher v3 should be built from verified bricks:
 4. accepted viewer controls: thumbnails, zoom, fit, pan, hand/arrow, medium/full modes;
 5. later: Word, Excel, images, DWG strategy, and modules.
 
+The intermediate product goal is documented in
+`docs/PRODUCT_DIRECTION_VISUAL_TRIAGE_AND_MODULES.md`: Launcher is a local
+visual-selection shell between project folders, native applications, and later
+bounded processing modules.  It must not be positioned or implemented as a
+replacement for CAD, Office, a full DMS, or a generic AI chat.
+
+- Preserve original files and source folder structure; cache is derived and
+  separately disposable.
+- Prioritize time to first useful preview, transparent progress, warm-cache
+  speed, and safe cache invalidation over an unrealistic promise that every
+  cold document set is fully rendered in seconds.
+- A future module must have declared inputs, output, confidence, and a
+  reproducible log; never add an opaque “AI button”.
+
 ## Session handoff
 
 Before the next product-development session, read `docs/HANDOFF_2026-08-12.md` and `docs/ROADMAP.md`.

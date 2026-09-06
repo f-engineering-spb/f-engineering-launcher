@@ -131,8 +131,24 @@ Next refinement:
 
 ## Phase 7 - Modules
 
-- Module registry.
-- Input selection.
-- Progress telemetry.
-- Result viewer integration.
+- Module registry with declared input formats, output, confidence and log.
+- Input selection from the active object/tree/filter, not opaque chat-only input.
+- Progress telemetry and dry-run/confirmation where results create files.
+- Result viewer integration and reproducible run history.
+- First candidate: registry-of-invoices ↔ scanned-invoices reconciliation.
+
+## Phase 8 - Pilot deployment
+
+- Local-first Windows installation on other computers.
+- Runtime diagnostics: available native applications, cache location and
+  supported preview paths.
+- Pilots against real project folders of 3–5 users.
+- Measure cold first-use time, warm-cache speed, errors and loss of context.
+- Keep VPS usage limited to a landing page, documentation and anonymized demo;
+  do not move users' live project folders or native-app integration to a VPS.
+
+Product direction and critical market assumptions:
+
+- `docs/PRODUCT_DIRECTION_VISUAL_TRIAGE_AND_MODULES.md`
+- `docs/MARKET_CRITICAL_REVIEW_BRIEF.md`
 

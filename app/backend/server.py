@@ -7,13 +7,16 @@ import json
 import mimetypes
 import os
 import shutil
+import string
 import subprocess
+import sys
+import threading
 import time
 from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 try:
     import openpyxl
@@ -31,8 +34,11 @@ EXCEL_CACHE_DIR = RUNTIME_DIR / "cache" / "excel"
 DWG_CACHE_DIR = RUNTIME_DIR / "cache" / "dwg"
 WORD_CONVERT_SCRIPT = REPO_ROOT / "scripts" / "convert_word_to_pdf.ps1"
 EXCEL_CONVERT_SCRIPT = REPO_ROOT / "scripts" / "convert_excel_to_pdf.ps1"
+EXCEL_XLS_CONVERT_SCRIPT = REPO_ROOT / "scripts" / "convert_xls_to_xlsx.ps1"
 DWG_RENDER_SCRIPT = REPO_ROOT / "scripts" / "render_dwg_model_space.ps1"
 DWG_REVIEW_OPEN_SCRIPT = REPO_ROOT / "scripts" / "open_dwg_review_copy.ps1"
+WORD_NATIVE_OPEN_SCRIPT = REPO_ROOT / "scripts" / "open_word_native.ps1"
+EXCEL_NATIVE_OPEN_SCRIPT = REPO_ROOT / "scripts" / "open_excel_native.ps1"
 VERSION = "0.4.0-v3-pdf-render"
 SKIP_DIR_NAMES = {".git", "__pycache__", "node_modules", ".venv", "venv"}
 DEFAULT_PDF_DPI = 300
@@ -43,6 +49,7 @@ EXCEL_CONVERT_TIMEOUT_SECONDS = 180
 DWG_RENDER_TIMEOUT_SECONDS = 180
 DWG_MODEL_PAGE_TIMEOUT_SECONDS = 75
 DWG_OPEN_TIMEOUT_SECONDS = 60
+NATIVE_OPEN_TIMEOUT_SECONDS = 60
 MAX_XLSX_ROWS = 2000
 MAX_XLSX_COLS = 100
 POPPLER_BIN_DIR = (
@@ -56,6 +63,9 @@ POPPLER_BIN_DIR = (
     / "Library"
     / "bin"
 )
+# Portable Poppler shipped inside a release archive.  Checked before the
+# machine-wide cache path so a copied release works on a fresh computer.
+PORTABLE_POPPLER_BIN_DIR = REPO_ROOT / "runtime" / "tools" / "poppler" / "Library" / "bin"
 
 
 def object_id_for_path(path: Path) -> str:
@@ -88,6 +98,8 @@ def build_tree(folder: Path) -> tuple[dict, dict[str, int], int, int]:
             }
 
         for entry in entries:
+            if entry.name.startswith("~$") or entry.name.startswith(".~"):
+                continue
             if entry.is_dir():
                 if entry.name in SKIP_DIR_NAMES:
                     continue
@@ -96,19 +108,226 @@ def build_tree(folder: Path) -> tuple[dict, dict[str, int], int, int]:
                 ext = file_extension(entry)
                 counts[ext] = counts.get(ext, 0) + 1
                 file_count += 1
-                children.append(
-                    {
-                        "type": "file",
-                        "name": entry.name,
-                        "path": str(entry),
-                        "extension": ext,
-                        "size": entry.stat().st_size,
-                    }
-                )
+                try:
+                    stat = entry.stat()
+                    size = stat.st_size
+                    mtime_ns = stat.st_mtime_ns
+                    stat_error = None
+                except OSError as stat_err:
+                    size = 0
+                    mtime_ns = 0
+                    stat_error = str(stat_err)
+                node = {
+                    "type": "file",
+                    "name": entry.name,
+                    "path": str(entry),
+                    "extension": ext,
+                    "size": size,
+                    "mtimeNs": mtime_ns,
+                }
+                if stat_error:
+                    node["error"] = stat_error
+                children.append(node)
 
         return {"type": "folder", "name": current.name, "path": str(current), "children": children}
 
     return walk(folder), counts, folder_count, file_count
+
+
+def tree_file_signatures(tree: dict | None) -> dict[str, dict]:
+    result: dict[str, dict] = {}
+
+    def walk(node: dict) -> None:
+        if node.get("type") == "file":
+            path = node.get("path") or ""
+            result[path.casefold()] = {
+                "path": path,
+                "name": node.get("name"),
+                "size": node.get("size"),
+                "mtimeNs": node.get("mtimeNs"),
+            }
+        for child in node.get("children") or []:
+            walk(child)
+
+    if tree:
+        walk(tree)
+    return result
+
+
+def diff_trees(old_tree: dict | None, new_tree: dict | None) -> dict:
+    old = tree_file_signatures(old_tree)
+    new = tree_file_signatures(new_tree)
+
+    def signature(entry: dict) -> tuple:
+        return (entry.get("size"), entry.get("mtimeNs"))
+
+    added: list[str] = []
+    changed: list[str] = []
+    removed: list[str] = []
+    unchanged: list[str] = []
+
+    for key, entry in new.items():
+        old_entry = old.get(key)
+        if old_entry is None:
+            added.append(entry["path"])
+        elif signature(old_entry) != signature(entry):
+            changed.append(entry["path"])
+        else:
+            unchanged.append(entry["path"])
+
+    for key, entry in old.items():
+        if key not in new:
+            removed.append(entry["path"])
+
+    # Эвристика переименования: если исчез ровно один файл и появился ровно
+    # один новый с тем же размером, считаем это переносом/заменой имени,
+    # а не «удалён + добавлен». Срабатывает только для однозначной пары,
+    # чтобы не объединять случайные файлы одинакового размера.
+    renamed: set[str] = set()
+    if len(removed) == 1 and len(added) == 1:
+        removed_path = removed[0]
+        added_path = added[0]
+        removed_entry = old.get(removed_path.casefold())
+        added_entry = new.get(added_path.casefold())
+        if (
+            removed_entry is not None
+            and added_entry is not None
+            and removed_entry.get("size") == added_entry.get("size")
+        ):
+            renamed.add(added_path.casefold())
+            renamed.add(removed_path.casefold())
+            changed.append(added_path)
+    if renamed:
+        added = [path for path in added if path.casefold() not in renamed]
+        removed = [path for path in removed if path.casefold() not in renamed]
+
+    return {
+        "added": sorted(added),
+        "changed": sorted(changed),
+        "removed": sorted(removed),
+        "unchanged": sorted(unchanged),
+    }
+
+
+
+def get_available_drives() -> list[dict]:
+    drives = []
+    for letter in string.ascii_uppercase:
+        drive_path = Path(f"{letter}:\\")
+        if drive_path.exists():
+            label = f"Диск {letter}:"
+            if letter == "H":
+                label = "Google Drive (H:)"
+            elif letter == "C":
+                label = "Локальный диск (C:)"
+            drives.append({"letter": f"{letter}:", "path": str(drive_path), "label": label})
+    return drives
+
+
+def discover_quick_projects() -> list[dict]:
+    candidates = [
+        Path(r"C:\Users\a9379\Downloads\Фасады корпуса 7.2"),
+        Path(r"C:\Users\a9379\Downloads\Фасады корпуса 7.2\Фасады корпуса 7.2"),
+        Path(r"H:\Общие диски\000_Объекты СПб\02_2026\03_ЖК МОД"),
+        Path(r"H:\Общие диски\000_Объекты СПб\02_2026\03_ЖК МОД\01-КБ"),
+        Path(r"H:\Общие диски\000_Объекты СПб\02_2026\03_ЖК МОД\01-КБ\04- Проекты"),
+        Path(r"H:\Общие диски\000_Объекты СПб\02_2026\01 _Голден сити Г9 Корпус 1 22193-09"),
+        Path(r"H:\Общие диски\000_Объекты СПб\01_2022-2025\12_ЖК МОД 21081-03"),
+        Path(r"C:\Users\a9379\Downloads\01. Фасады_Тендерный пакет (2)"),
+    ]
+    projects = []
+    seen = set()
+    for candidate in candidates:
+        try:
+            if candidate.exists() and candidate.is_dir() and str(candidate).casefold() not in seen:
+                seen.add(str(candidate).casefold())
+                projects.append({
+                    "name": candidate.name,
+                    "path": str(candidate.resolve()),
+                    "parentName": candidate.parent.name,
+                })
+        except Exception:
+            continue
+    return projects
+
+
+def browse_filesystem(raw_path: str = "") -> dict:
+    drives = get_available_drives()
+    quick_projects = discover_quick_projects()
+    if not raw_path or not raw_path.strip():
+        default_dir = Path("H:/Общие диски/000_Объекты СПб") if Path("H:/Общие диски/000_Объекты СПб").exists() else Path("C:/Users/a9379")
+        target = default_dir
+    else:
+        target = Path(raw_path.strip().strip('"')).expanduser()
+
+    if not target.exists():
+        target = Path.home()
+
+    if target.is_file():
+        target = target.parent
+
+    target = target.resolve()
+
+    folders = []
+    files = []
+    dwg_count = 0
+    pdf_count = 0
+    excel_count = 0
+    word_count = 0
+
+    try:
+        for entry in target.iterdir():
+            try:
+                if entry.name.startswith("~$") or entry.name.startswith(".~"):
+                    continue
+                if entry.is_dir():
+                    folders.append({
+                        "name": entry.name,
+                        "path": str(entry.resolve()),
+                    })
+                elif entry.is_file():
+                    ext = entry.suffix.lower()
+                    if ext == ".dwg":
+                        dwg_count += 1
+                    elif ext == ".pdf":
+                        pdf_count += 1
+                    elif ext in (".xlsx", ".xls"):
+                        excel_count += 1
+                    elif ext in (".docx", ".doc"):
+                        word_count += 1
+                    files.append({
+                        "name": entry.name,
+                        "path": str(entry.resolve()),
+                        "ext": ext,
+                        "size": entry.stat().st_size,
+                    })
+            except (PermissionError, OSError):
+                continue
+    except (PermissionError, OSError):
+        pass
+
+    folders.sort(key=lambda x: x["name"].casefold())
+    files.sort(key=lambda x: x["name"].casefold())
+
+    parent_path = str(target.parent.resolve()) if target.parent != target else None
+
+    return {
+        "current": str(target),
+        "parent": parent_path,
+        "drives": drives,
+        "folders": folders,
+        "files": files[:100],
+        "totalFiles": len(files),
+        "totalFolders": len(folders),
+        "stats": {
+            "dwg": dwg_count,
+            "pdf": pdf_count,
+            "excel": excel_count,
+            "word": word_count,
+            "other": len(files) - (dwg_count + pdf_count + excel_count + word_count),
+        },
+        "quickProjects": quick_projects,
+    }
 
 
 def scan_object(raw_path: str) -> dict:
@@ -116,13 +335,20 @@ def scan_object(raw_path: str) -> dict:
         raise ValueError("Путь к папке объекта пустой")
     root = Path(raw_path.strip().strip('"')).expanduser()
     if not root.exists():
-        raise FileNotFoundError(f"Папка не найдена: {root}")
+        raise FileNotFoundError(f"Путь не найден: {root}")
+    if root.is_file():
+        root = root.parent
     if not root.is_dir():
         raise NotADirectoryError(f"Это не папка: {root}")
 
+    object_id = object_id_for_path(root)
+    previous = load_manifest(object_id)
+    previous_tree = (previous or {}).get("tree")
+
     tree, extension_counts, folder_count, file_count = build_tree(root)
+    last_diff = diff_trees(previous_tree, tree)
     manifest = {
-        "id": object_id_for_path(root),
+        "id": object_id,
         "name": root.name,
         "rootPath": str(root.resolve()),
         "scannedAt": datetime.now().isoformat(timespec="seconds"),
@@ -132,6 +358,7 @@ def scan_object(raw_path: str) -> dict:
             "extensions": extension_counts,
         },
         "tree": tree,
+        "lastDiff": last_diff,
     }
     MANIFESTS_DIR.mkdir(parents=True, exist_ok=True)
     (MANIFESTS_DIR / f"{manifest['id']}.json").write_text(
@@ -187,10 +414,14 @@ def file_cache_key(path: Path, purpose: str) -> str:
 
 
 def is_word_file(path: Path) -> bool:
+    if path.name.startswith("~$") or path.name.startswith(".~"):
+        return False
     return path.suffix.casefold() in {".doc", ".docx"}
 
 
 def is_excel_file(path: Path) -> bool:
+    if path.name.startswith("~$") or path.name.startswith(".~"):
+        return False
     return path.suffix.casefold() in {".xls", ".xlsx", ".xlsm"}
 
 
@@ -275,9 +506,10 @@ def write_pdf_cache_manifest(
 
 
 def poppler_tool(name: str) -> str | None:
-    exe = POPPLER_BIN_DIR / f"{name}.exe"
-    if exe.exists():
-        return str(exe)
+    for candidate in (PORTABLE_POPPLER_BIN_DIR, POPPLER_BIN_DIR):
+        exe = candidate / f"{name}.exe"
+        if exe.exists():
+            return str(exe)
     found = shutil.which(name)
     if found and not found.lower().endswith(".cmd"):
         return found
@@ -499,33 +731,313 @@ def render_dwg_model(path: Path, dpi: int = DEFAULT_PDF_DPI) -> dict:
     return document
 
 
-def open_dwg_for_review(path: Path) -> Path:
-    """Open the original DWG through the registered Windows application.
-
-    ZWCAD COM automation creates hidden ``/Automation`` instances which can
-    hang while a drawing is opening from Google Drive.  ShellExecute follows
-    the same association and DDE path as a user double-click in Explorer.
-    """
+def launch_native_file(path: Path) -> str:
+    """Launch a file in its native desktop program reliably, bypassing broken system associations."""
     if not path.exists() or not path.is_file():
-        raise FileNotFoundError(f"DWG-файл не найден: {path}")
-    if os.name == "nt":
-        os.startfile(str(path))  # type: ignore[attr-defined]
-    else:
+        raise FileNotFoundError(f"Файл не найден: {path}")
+
+    if os.name != "nt":
         subprocess.Popen(["xdg-open", str(path)])
-    return path
+        return "xdg-open"
+
+    try:
+        import ctypes
+        # Allow newly spawned window to take foreground focus immediately
+        ctypes.windll.user32.AllowSetForegroundWindow(ctypes.c_uint32(0xFFFFFFFF))
+    except Exception:
+        pass
+
+    suffix = path.suffix.casefold()
+
+    # 1. DWG / DXF -> ZWCAD / AutoCAD
+    if suffix in {".dwg", ".dxf"}:
+        zwcad_candidates = [
+            Path(r"C:\Program Files\ZWSOFT\ZWCAD 2025\ZWCAD.exe"),
+            Path(r"C:\Program Files\ZWSOFT\ZWCAD 2024\ZWCAD.exe"),
+            Path(r"C:\Program Files\ZWSOFT\ZWCAD 2025\ZwLauncher.exe"),
+        ]
+        for cand in zwcad_candidates:
+            if cand.exists():
+                subprocess.Popen([str(cand), str(path)], cwd=str(cand.parent))
+                return f"zwcad-direct:{cand.name}"
+        try:
+            os.startfile(str(path))
+            return "dwg-startfile"
+        except Exception:
+            subprocess.Popen(["cmd.exe", "/c", "start", "", str(path)])
+            return "dwg-cmd-start"
+
+    # 2. Excel / Spreadsheets -> Microsoft Excel
+    if suffix in {".xlsx", ".xls", ".xlsm", ".xlsb", ".csv", ".ods"}:
+        excel_candidates = [
+            Path(r"C:\Program Files\Microsoft Office\Root\Office16\EXCEL.EXE"),
+            Path(r"C:\Program Files (x86)\Microsoft Office\Root\Office16\EXCEL.EXE"),
+            Path(r"C:\Program Files\Microsoft Office\Office16\EXCEL.EXE"),
+            Path(r"C:\Program Files (x86)\Microsoft Office\Office16\EXCEL.EXE"),
+            Path(r"C:\Program Files\Microsoft Office\Office15\EXCEL.EXE"),
+        ]
+        for cand in excel_candidates:
+            if cand.exists():
+                subprocess.Popen([str(cand), str(path)], cwd=str(cand.parent))
+                return f"excel-direct:{cand.name}"
+        try:
+            os.startfile(str(path))
+            return "excel-startfile"
+        except Exception:
+            subprocess.Popen(["cmd.exe", "/c", "start", "", str(path)])
+            return "excel-cmd-start"
+
+    # 3. Word / Documents -> Microsoft Word
+    if suffix in {".docx", ".doc", ".docm", ".rtf", ".dotx", ".odt"}:
+        word_candidates = [
+            Path(r"C:\Program Files\Microsoft Office\Root\Office16\WINWORD.EXE"),
+            Path(r"C:\Program Files (x86)\Microsoft Office\Root\Office16\WINWORD.EXE"),
+            Path(r"C:\Program Files\Microsoft Office\Office16\WINWORD.EXE"),
+            Path(r"C:\Program Files (x86)\Microsoft Office\Office16\WINWORD.EXE"),
+            Path(r"C:\Program Files\Microsoft Office\Office15\WINWORD.EXE"),
+        ]
+        for cand in word_candidates:
+            if cand.exists():
+                subprocess.Popen([str(cand), str(path)], cwd=str(cand.parent))
+                return f"word-direct:{cand.name}"
+        try:
+            os.startfile(str(path))
+            return "word-startfile"
+        except Exception:
+            subprocess.Popen(["cmd.exe", "/c", "start", "", str(path)])
+            return "word-cmd-start"
+
+    # 4. PDF -> ONLYOFFICE Desktop Editors / Edge / Chrome
+    if suffix == ".pdf":
+        pdf_candidates = [
+            Path(r"C:\Program Files\ONLYOFFICE\DesktopEditors\DesktopEditors.exe"),
+            Path(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"),
+            Path(r"C:\Program Files\Google\Chrome\Application\chrome.exe"),
+        ]
+        for cand in pdf_candidates:
+            if cand.exists():
+                subprocess.Popen([str(cand), str(path)], cwd=str(cand.parent))
+                return f"pdf-direct:{cand.name}"
+        try:
+            os.startfile(str(path))
+            return "pdf-startfile"
+        except Exception:
+            subprocess.Popen(["cmd.exe", "/c", "start", "", str(path)])
+            return "pdf-cmd-start"
+
+    # 5. Images -> Modern Paint / Photo Viewer
+    if suffix in {".png", ".jpg", ".jpeg", ".bmp", ".webp", ".gif", ".ico", ".tif", ".tiff"}:
+        paint_candidates = [
+            Path.home() / "AppData" / "Local" / "Microsoft" / "WindowsApps" / "mspaint.exe",
+            Path(r"C:\Windows\system32\mspaint.exe"),
+        ]
+        for cand in paint_candidates:
+            if cand.exists():
+                subprocess.Popen([str(cand), str(path)])
+                return f"paint-direct:{cand.name}"
+        try:
+            os.startfile(str(path))
+            return "image-startfile"
+        except Exception:
+            subprocess.Popen(["cmd.exe", "/c", "start", "", str(path)])
+            return "image-cmd-start"
+
+    # 6. Video / Audio -> VLC or default media player
+    if suffix in {".mp4", ".avi", ".mov", ".mkv", ".wmv", ".flv", ".mp3", ".wav", ".m4a", ".aac", ".ogg", ".wma"}:
+        vlc_candidates = [
+            Path(r"C:\Program Files\VideoLAN\VLC\vlc.exe"),
+            Path(r"C:\Program Files (x86)\VideoLAN\VLC\vlc.exe"),
+        ]
+        for cand in vlc_candidates:
+            if cand.exists():
+                subprocess.Popen([str(cand), str(path)], cwd=str(cand.parent))
+                return f"vlc-direct:{cand.name}"
+        try:
+            os.startfile(str(path))
+            return "media-startfile"
+        except Exception:
+            subprocess.Popen(["cmd.exe", "/c", "start", "", str(path)])
+            return "media-cmd-start"
+
+    # 7. Archives -> 7-Zip or WinRAR
+    if suffix in {".zip", ".rar", ".7z", ".tar", ".gz", ".bz2"}:
+        archive_candidates = [
+            Path(r"C:\Program Files\7-Zip\7zFM.exe"),
+            Path(r"C:\Program Files (x86)\WinRAR\WinRAR.exe"),
+            Path(r"C:\Program Files\WinRAR\WinRAR.exe"),
+        ]
+        for cand in archive_candidates:
+            if cand.exists():
+                subprocess.Popen([str(cand), str(path)], cwd=str(cand.parent))
+                return f"archive-direct:{cand.name}"
+        try:
+            os.startfile(str(path))
+            return "archive-startfile"
+        except Exception:
+            subprocess.Popen(["cmd.exe", "/c", "start", "", str(path)])
+            return "archive-cmd-start"
+
+    # 8. Text / Config / Code files -> Notepad
+    if suffix in {".txt", ".log", ".cfg", ".ini", ".conf", ".json", ".xml", ".yaml", ".yml", ".sql", ".bat", ".cmd", ".ps1", ".py", ".js", ".html", ".css"}:
+        try:
+            subprocess.Popen(["notepad.exe", str(path)])
+            return "notepad-direct"
+        except Exception:
+            pass
+
+    # 9. General fallback for all remaining file types
+    try:
+        os.startfile(str(path))
+        return "os-startfile"
+    except Exception:
+        subprocess.Popen(["cmd.exe", "/c", "start", "", str(path)])
+        return "cmd-start"
+
+
+def open_dwg_for_review(path: Path) -> str:
+    return launch_native_file(path)
+
+
+def open_word_native(path: Path) -> str:
+    return launch_native_file(path)
+
+
+def open_excel_native(path: Path) -> str:
+    return launch_native_file(path)
+
+
+def open_pdf_native(path: Path) -> str:
+    return launch_native_file(path)
+
+
+def find_msedge() -> str | None:
+    for program_files in ("C:/Program Files (x86)/Microsoft/Edge/Application", "C:/Program Files/Microsoft/Edge/Application"):
+        candidate = Path(program_files) / "msedge.exe"
+        if candidate.exists():
+            return str(candidate)
+    found = shutil.which("msedge")
+    return found if found else None
+
+
+NATIVE_OPEN_LOG_LOCK = threading.Lock()
 
 
 def append_native_open_log(event: dict) -> None:
-    """Write one UTF-8 diagnostic record for a native-open attempt."""
+    """Write one UTF-8 diagnostic record for a native-open attempt.
+
+    ThreadingHTTPServer serves each request on its own thread, so concurrent
+    /api/open-file calls can interleave partial JSON lines.  A lock keeps each
+    record as one atomic write.
+    """
     logs_dir = RUNTIME_DIR / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
-    with (logs_dir / "native-open.jsonl").open("a", encoding="utf-8") as log:
-        log.write(json.dumps(event, ensure_ascii=False) + "\n")
+    line = json.dumps(event, ensure_ascii=False) + "\n"
+    with NATIVE_OPEN_LOG_LOCK:
+        with (logs_dir / "native-open.jsonl").open("a", encoding="utf-8") as log:
+            log.write(line)
 
 
 def excel_html_cache_dir(path: Path) -> Path:
     """Return an immutable cache location for one exact workbook revision."""
     return EXCEL_CACHE_DIR / "html" / file_cache_key(path, "excel-html")
+
+
+def excel_convert_xls_to_xlsx(path: Path) -> tuple[Path, bool]:
+    """Convert a legacy .xls workbook to .xlsx via Excel COM, cached by source.
+
+    openpyxl can only read the OpenXML formats, so legacy .xls books are
+    converted once through the installed Excel and reused until the source
+    file changes.  The converted copy is only a preview source: nothing is
+    written next to the original workbook.
+    """
+    if path.suffix.casefold() not in {".xls"}:
+        raise ValueError(f"Это не файл XLS: {path}")
+    if not EXCEL_XLS_CONVERT_SCRIPT.exists():
+        raise RuntimeError(f"Скрипт конвертации XLS не найден: {EXCEL_XLS_CONVERT_SCRIPT}")
+
+    key = file_cache_key(path, "excel-xls-convert")
+    target_dir = EXCEL_CACHE_DIR / "xlsx" / key
+    target_dir.mkdir(parents=True, exist_ok=True)
+    xlsx_path = target_dir / f"{path.stem}.xlsx"
+    manifest_path = target_dir / "manifest.json"
+
+    cached = False
+    if xlsx_path.exists() and xlsx_path.stat().st_size > 0 and manifest_path.exists():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            cached = (
+                manifest.get("sourcePath") == str(path)
+                and manifest.get("sourceMtimeNs") == path.stat().st_mtime_ns
+                and manifest.get("sourceSize") == path.stat().st_size
+            )
+        except (OSError, json.JSONDecodeError):
+            cached = False
+
+    if cached:
+        return xlsx_path, True
+
+    if xlsx_path.exists():
+        xlsx_path.unlink()
+
+    process = subprocess.run(
+        [
+            "powershell",
+            "-STA",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(EXCEL_XLS_CONVERT_SCRIPT),
+            "-InputPath",
+            str(path),
+            "-OutputPath",
+            str(xlsx_path),
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=EXCEL_CONVERT_TIMEOUT_SECONDS,
+    )
+    if process.returncode != 0:
+        message = process.stderr.strip() or process.stdout.strip() or "Excel не смог сконвертировать книгу XLS"
+        raise RuntimeError(message)
+    if not xlsx_path.exists() or xlsx_path.stat().st_size <= 0:
+        raise RuntimeError("Excel не создал XLSX для preview")
+
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "sourcePath": str(path),
+                "sourceName": path.name,
+                "sourceMtimeNs": path.stat().st_mtime_ns,
+                "sourceSize": path.stat().st_size,
+                "cacheKey": key,
+                "xlsxPath": str(xlsx_path),
+                "convertedAt": datetime.now().isoformat(timespec="seconds"),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    return xlsx_path, False
+
+
+def excel_preview_source(path: Path) -> Path:
+    """Return an .xlsx/.xlsm path openpyxl can read, converting legacy .xls.
+
+    HTML rendering and sheet extraction both need the OpenXML workbook.
+    .xlsx/.xlsm files are used as-is; .xls is converted through Excel COM.
+    """
+    if path.name.startswith("~$") or path.name.startswith(".~"):
+        raise ValueError(f"Временный файл блокировки Office: {path.name}")
+    if path.suffix.casefold() in {".xlsx", ".xlsm"}:
+        return path
+    if path.suffix.casefold() == ".xls":
+        xlsx_path, _ = excel_convert_xls_to_xlsx(path)
+        return xlsx_path
+    raise ValueError("HTML-просмотр пока поддерживает XLSX/XLSM. Откройте XLS в Excel.")
 
 
 def excel_cell_color(color: object) -> str | None:
@@ -544,11 +1056,11 @@ def excel_sheet_html(path: Path, sheet_index: int) -> tuple[str, dict]:
     """
     if openpyxl is None:
         raise RuntimeError("Для HTML-просмотра Excel нужен пакет openpyxl")
-    if path.suffix.casefold() not in {".xlsx", ".xlsm"}:
-        raise ValueError("HTML-просмотр пока поддерживает XLSX/XLSM. Откройте XLS в Excel.")
 
-    styles_book = openpyxl.load_workbook(path, read_only=False, data_only=False)
-    values_book = openpyxl.load_workbook(path, read_only=False, data_only=True)
+    preview_source = excel_preview_source(path)
+
+    styles_book = openpyxl.load_workbook(preview_source, read_only=False, data_only=False)
+    values_book = openpyxl.load_workbook(preview_source, read_only=False, data_only=True)
     try:
         sheet = styles_book.worksheets[sheet_index]
         values = values_book.worksheets[sheet_index]
@@ -662,13 +1174,13 @@ def excel_sheet_html(path: Path, sheet_index: int) -> tuple[str, dict]:
         page = f'''<!doctype html><html lang="ru"><head><meta charset="utf-8"><title>{html.escape(sheet.title)}</title>
 <style>
 html,body{{margin:0;min-width:max-content;background:#fff;color:#20262d;font:11px "Segoe UI",Arial,sans-serif;overflow:auto}}
-#sheet-canvas{{position:relative;transform-origin:0 0}}#sheet{{position:absolute;left:0;top:0;transform-origin:0 0}}
+#sheet-canvas{{position:relative;transform-origin:0 0}}#sheet{{position:absolute;left:0;top:0;transform-origin:50% 50%}}
 .notice{{position:sticky;top:0;z-index:2;padding:6px 10px;border-bottom:1px solid #d3dde4;background:#f7fafc;color:#607080;font-size:11px}}
 table{{border-collapse:collapse;table-layout:fixed;width:{table_width}px}}col.row-number{{width:38px}}
 th,td{{box-sizing:border-box;border:1px solid #cbd5dc;padding:2px 4px;vertical-align:top;white-space:pre-wrap;overflow-wrap:break-word}}
 th{{position:sticky;left:0;z-index:1;background:#f1f5f7;color:#657687;font:10px "Segoe UI",Arial,sans-serif;text-align:right}}td{{overflow:hidden}}
 </style></head><body><div id="sheet-canvas"><div id="sheet"><table><colgroup>{cols}</colgroup><tbody>{''.join(rows)}</tbody></table></div></div>
-<script>const canvas=document.getElementById('sheet-canvas'),sheet=document.getElementById('sheet');let width=0,height=0,padding=0,scale=1,rotation=0,hand=true,dragging=false,startX=0,startY=0,startLeft=0,startTop=0;function dimensions(){{return Math.abs(rotation%180)===90?{{width:height,height:width}}:{{width,height}}}}function zoom(value){{if(!width){{width=sheet.offsetWidth;height=sheet.offsetHeight}}scale=Math.max(.35,Math.min(3,value));padding=Math.max(innerWidth,innerHeight);const size=dimensions();canvas.style.width=(size.width*scale+padding*2)+'px';canvas.style.height=(size.height*scale+padding*2)+'px';sheet.style.transform='translate('+padding+'px,'+padding+'px) rotate('+rotation+'deg) scale('+scale+')'}}function fit(){{if(!width)zoom(1);const size=dimensions(),value=Math.min(1,(innerWidth-48)/size.width,(innerHeight-48)/size.height);zoom(value);requestAnimationFrame(()=>{{scrollTo(padding,padding);parent.postMessage({{type:'launcher-sheet-fitted',value:scale}},'*')}})}}function cursor(){{document.body.style.cursor=hand?(dragging?'grabbing':'grab'):'default'}}addEventListener('load',()=>{{zoom(1);cursor();requestAnimationFrame(()=>scrollTo(padding,padding))}});addEventListener('wheel',event=>{{if(!event.ctrlKey)return;event.preventDefault();zoom(scale*(event.deltaY<0?1.12:.89))}},{{passive:false}});addEventListener('pointerdown',event=>{{if(!hand||event.button!==0)return;dragging=true;startX=event.clientX;startY=event.clientY;startLeft=scrollX;startTop=scrollY;document.body.setPointerCapture?.(event.pointerId);cursor();event.preventDefault()}});addEventListener('pointermove',event=>{{if(!dragging)return;scrollTo(startLeft-(event.clientX-startX),startTop-(event.clientY-startY))}});addEventListener('pointerup',event=>{{if(!dragging)return;dragging=false;document.body.releasePointerCapture?.(event.pointerId);cursor()}});addEventListener('pointercancel',()=>{{dragging=false;cursor()}});addEventListener('message',event=>{{if(!event.data)return;if(event.data.type==='launcher-sheet-zoom')zoom(event.data.value);if(event.data.type==='launcher-sheet-fit')fit();if(event.data.type==='launcher-sheet-rotate'){{rotation=((Number(event.data.value)||0)%360+360)%360;zoom(scale)}}if(event.data.type==='launcher-sheet-hand'){{hand=Boolean(event.data.value);dragging=false;cursor()}}}});</script></body></html>'''
+<script>const canvas=document.getElementById('sheet-canvas'),sheet=document.getElementById('sheet');let width=0,height=0,padding=0,scale=1,rotation=0,hand=true,dragging=false,startX=0,startY=0,startLeft=0,startTop=0;function dimensions(){{return Math.abs(rotation%180)===90?{{width:height,height:width}}:{{width,height}}}}function zoom(value){{if(!width){{width=sheet.offsetWidth;height=sheet.offsetHeight}}scale=Math.max(.35,Math.min(3,value));padding=Math.max(innerWidth,innerHeight);const size=dimensions();canvas.style.width=(size.width*scale+padding*2)+'px';canvas.style.height=(size.height*scale+padding*2)+'px';sheet.style.transform='translate('+(padding+size.width*scale/2-width/2)+'px,'+(padding+size.height*scale/2-height/2)+'px) rotate('+rotation+'deg) scale('+scale+')'}}function fit(){{if(!width)zoom(1);const size=dimensions(),value=Math.min(1,(innerWidth-48)/size.width,(innerHeight-48)/size.height);zoom(value);requestAnimationFrame(()=>{{scrollTo(padding,padding);parent.postMessage({{type:'launcher-sheet-fitted',value:scale}},'*')}})}}function cursor(){{document.body.style.cursor=hand?(dragging?'grabbing':'grab'):'default'}}addEventListener('load',()=>{{zoom(1);cursor();requestAnimationFrame(()=>scrollTo(padding,padding))}});addEventListener('wheel',event=>{{if(!event.ctrlKey)return;event.preventDefault();zoom(scale*(event.deltaY<0?1.12:.89))}},{{passive:false}});addEventListener('pointerdown',event=>{{if(!hand||event.button!==0)return;dragging=true;startX=event.clientX;startY=event.clientY;startLeft=scrollX;startTop=scrollY;document.body.setPointerCapture?.(event.pointerId);cursor();event.preventDefault()}});addEventListener('pointermove',event=>{{if(!dragging)return;scrollTo(startLeft-(event.clientX-startX),startTop-(event.clientY-startY))}});addEventListener('pointerup',event=>{{if(!dragging)return;dragging=false;document.body.releasePointerCapture?.(event.pointerId);cursor()}});addEventListener('pointercancel',()=>{{dragging=false;cursor()}});addEventListener('message',event=>{{if(!event.data)return;if(event.data.type==='launcher-sheet-zoom')zoom(event.data.value);if(event.data.type==='launcher-sheet-fit')fit();if(event.data.type==='launcher-sheet-rotate'){{rotation=((Number(event.data.value)||0)%360+360)%360;zoom(scale)}}if(event.data.type==='launcher-sheet-hand'){{hand=Boolean(event.data.value);dragging=false;cursor()}}}});</script></body></html>'''
         return page, rendered
     finally:
         styles_book.close()
@@ -681,8 +1193,8 @@ def excel_sheet_preview(path: Path, sheet_index: int) -> dict:
     cache_dir.mkdir(parents=True, exist_ok=True)
     # A new cache version makes existing pages harmless without deleting a
     # user's cache, including the viewer controls embedded in this HTML.
-    output = cache_dir / f"sheet-{sheet_index + 1}-v8.html"
-    metadata_path = cache_dir / f"sheet-{sheet_index + 1}-v8.json"
+    output = cache_dir / f"sheet-{sheet_index + 1}-v9.html"
+    metadata_path = cache_dir / f"sheet-{sheet_index + 1}-v9.json"
     metadata = None
     if output.exists() and metadata_path.exists():
         try:
@@ -719,14 +1231,15 @@ def excel_thumbnail_preview(path: Path) -> str:
 def excel_workbook_preview(path: Path) -> dict:
     if not path.exists() or not path.is_file():
         raise FileNotFoundError(f"Excel-файл не найден: {path}")
+    if path.name.startswith("~$") or path.name.startswith(".~"):
+        raise ValueError(f"Временный файл блокировки Office: {path.name}")
     if not is_excel_file(path):
         raise ValueError(f"Это не Excel-файл: {path}")
     if openpyxl is None:
         raise RuntimeError("Для HTML-просмотра Excel нужен пакет openpyxl")
-    if path.suffix.casefold() not in {".xlsx", ".xlsm"}:
-        raise ValueError("HTML-просмотр пока поддерживает XLSX/XLSM. Откройте XLS в Excel.")
 
-    book = openpyxl.load_workbook(path, read_only=True, data_only=False)
+    preview_source = excel_preview_source(path)
+    book = openpyxl.load_workbook(preview_source, read_only=True, data_only=False)
     try:
         sheet_names = book.sheetnames
     finally:
@@ -1061,6 +1574,38 @@ class LauncherHandler(BaseHTTPRequestHandler):
             )
             return
 
+        if parsed.path == "/api/file/raw":
+            try:
+                params = parse_qs(parsed.query)
+                raw_path = params.get("path", [""])[0].strip()
+                if not raw_path:
+                    self.send_error(HTTPStatus.BAD_REQUEST, "Missing path")
+                    return
+                target = Path(raw_path).expanduser().resolve()
+                if not target.exists() or not target.is_file():
+                    self.send_error(HTTPStatus.NOT_FOUND, "File not found")
+                    return
+                content_type = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
+                body = target.read_bytes()
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception as error:
+                self.send_error(HTTPStatus.BAD_REQUEST, str(error))
+            return
+
+        if parsed.path == "/api/browse":
+            try:
+                params = parse_qs(parsed.query)
+                target_path = params.get("path", [""])[0].strip()
+                result = browse_filesystem(target_path)
+                self.send_json(HTTPStatus.OK, result)
+            except Exception as error:
+                self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
+            return
+
         if parsed.path == "/api/objects":
             self.send_json(HTTPStatus.OK, {"items": list_object_summaries()})
             return
@@ -1105,19 +1650,91 @@ class LauncherHandler(BaseHTTPRequestHandler):
                 self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
             return
 
+        if parsed.path == "/api/objects/diff":
+            try:
+                body = self.read_json()
+                object_id = str(body.get("id", "")).strip()
+                manifest = load_manifest(object_id)
+                if not manifest:
+                    raise ValueError("Объект не найден")
+                root = Path(manifest.get("rootPath", ""))
+                if not root.exists():
+                    raise FileNotFoundError(f"Папка объекта не найдена: {root}")
+                tree, extension_counts, folder_count, file_count = build_tree(root)
+                last_diff = diff_trees(manifest.get("tree"), tree)
+                self.send_json(
+                    HTTPStatus.OK,
+                    {
+                        "id": object_id,
+                        "scannedAt": datetime.now().isoformat(timespec="seconds"),
+                        "statistics": {
+                            "folders": folder_count,
+                            "files": file_count,
+                            "extensions": extension_counts,
+                        },
+                        "lastDiff": last_diff,
+                    },
+                )
+            except (ValueError, FileNotFoundError, OSError, json.JSONDecodeError) as error:
+                self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
+            return
+
+        if parsed.path == "/api/open-explorer":
+            try:
+                body = self.read_json()
+                raw_path = str(body.get("path", "")).strip()
+                if not raw_path:
+                    raw_path = str(REPO_ROOT)
+                target = Path(raw_path.strip('"')).resolve()
+                if target.exists():
+                    subprocess.Popen(["explorer.exe", str(target)])
+                    self.send_json(HTTPStatus.OK, {"ok": True, "path": str(target)})
+                else:
+                    self.send_json(HTTPStatus.NOT_FOUND, {"error": f"Путь не найден: {target}"})
+            except Exception as error:
+                self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
+            return
+
         if parsed.path == "/api/choose-folder":
             try:
-                import tkinter as tk
-                from tkinter import filedialog
-
-                root = tk.Tk()
-                root.withdraw()
-                root.attributes("-topmost", True)
-                selected = filedialog.askdirectory(title="Выберите папку объекта для F-Engineering Launcher v3")
-                root.destroy()
-                self.send_json(HTTPStatus.OK, {"path": selected})
+                choose_script = REPO_ROOT / "scripts" / "choose_folder.py"
+                proc = subprocess.run(
+                    [sys.executable, str(choose_script)],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=15,
+                )
+                raw = proc.stdout.strip()
+                files = []
+                selected = ""
+                if raw:
+                    try:
+                        parsed_json = json.loads(raw)
+                        if isinstance(parsed_json, list) and parsed_json:
+                            files = parsed_json
+                            first_file = Path(files[0])
+                            selected = str(first_file.parent if first_file.is_file() else first_file.resolve())
+                        elif isinstance(parsed_json, str):
+                            selected = parsed_json
+                    except json.JSONDecodeError:
+                        first_line = raw.splitlines()[0].strip()
+                        p = Path(first_line)
+                        selected = str(p.parent if p.is_file() else p.resolve())
+                self.send_json(HTTPStatus.OK, {"path": selected, "files": files})
+            except subprocess.TimeoutExpired:
+                self.send_json(
+                    HTTPStatus.OK,
+                    {
+                        "path": "",
+                        "files": [],
+                        "timedOut": True,
+                        "error": "Окно выбора файлов Windows не ответило за 15 секунд. Выберите объект из списка или укажите папку во встроенном проводнике.",
+                    },
+                )
             except Exception as error:
-                self.send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": f"Диалог выбора папки недоступен: {error}"})
+                self.send_json(HTTPStatus.OK, {"path": "", "files": [], "error": f"Диалог выбора файлов недоступен: {error}"})
             return
 
         if parsed.path == "/api/pdf/render":
@@ -1280,7 +1897,7 @@ class LauncherHandler(BaseHTTPRequestHandler):
                 if not raw_file:
                     raise ValueError("Не выбран Excel-файл для отображения")
                 self.send_json(HTTPStatus.OK, excel_workbook_preview(Path(raw_file)))
-            except (ValueError, FileNotFoundError, RuntimeError, OSError, json.JSONDecodeError) as error:
+            except Exception as error:
                 self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
             return
 
@@ -1291,7 +1908,7 @@ class LauncherHandler(BaseHTTPRequestHandler):
                 sheet_index = int(body.get("sheetIndex", 0))
                 sheet = excel_sheet_preview(Path(raw_file), sheet_index)
                 self.send_json(HTTPStatus.OK, sheet)
-            except (ValueError, IndexError, FileNotFoundError, RuntimeError, OSError, json.JSONDecodeError) as error:
+            except Exception as error:
                 self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
             return
 
@@ -1323,7 +1940,7 @@ class LauncherHandler(BaseHTTPRequestHandler):
                         "renderedAt": datetime.now().isoformat(timespec="seconds"),
                     },
                 )
-            except (ValueError, FileNotFoundError, RuntimeError, OSError, subprocess.TimeoutExpired, json.JSONDecodeError) as error:
+            except Exception as error:
                 self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
             return
 
@@ -1344,7 +1961,7 @@ class LauncherHandler(BaseHTTPRequestHandler):
                 payload["convertedPdfPath"] = str(pdf_path)
                 payload["convertCacheHit"] = convert_cache_hit
                 self.send_json(HTTPStatus.OK, payload)
-            except (ValueError, FileNotFoundError, RuntimeError, OSError, subprocess.TimeoutExpired, json.JSONDecodeError) as error:
+            except Exception as error:
                 self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
             return
 
@@ -1360,22 +1977,21 @@ class LauncherHandler(BaseHTTPRequestHandler):
                 target = Path(raw_file).expanduser()
                 if not target.exists() or not target.is_file():
                     raise FileNotFoundError(f"Файл не найден: {target}")
-                opened_path = target
-                if os.name == "nt":
-                    if target.suffix.casefold() == ".dwg":
-                        opened_path = open_dwg_for_review(target)
-                    else:
-                        os.startfile(str(target))  # type: ignore[attr-defined]
-                else:
-                    subprocess.Popen(["xdg-open", str(target)])
-                mode = "read-only-source" if target.suffix.casefold() == ".dwg" else "native"
+                opened_path = str(target)
+                suffix = target.suffix.casefold()
+                # Google Drive shortcuts (.gsheet / .gdoc / .gslides) are virtual
+                # reparse points, not real Office documents.  Launching them
+                # through a local EXE is unpredictable, so give a clear hint.
+                if suffix in {".gsheet", ".gdoc", ".gslides"}:
+                    raise ValueError("Это облачный документ Google. Откройте его через браузер (Google Docs / Sheets).")
+                mode = launch_native_file(target)
                 append_native_open_log(
                     {
                         "at": datetime.now().isoformat(timespec="seconds"),
                         "status": "requested",
-                        "extension": target.suffix.casefold(),
+                        "extension": suffix,
                         "sourcePath": str(target),
-                        "openedPath": str(opened_path),
+                        "openedPath": opened_path,
                         "mode": mode,
                         "elapsedMs": round((time.perf_counter() - started) * 1000),
                     }
@@ -1385,11 +2001,16 @@ class LauncherHandler(BaseHTTPRequestHandler):
                     {
                         "ok": True,
                         "path": str(target),
-                        "openedPath": str(opened_path) if target.suffix.casefold() == ".dwg" else str(target),
+                        "openedPath": opened_path,
                         "mode": mode,
+                        "longPathWarning": (
+                            "Путь длиннее 240 символов — Windows может не открыть файл."
+                            if len(opened_path) > 240
+                            else None
+                        ),
                     },
                 )
-            except (ValueError, FileNotFoundError, OSError, RuntimeError, subprocess.TimeoutExpired, json.JSONDecodeError) as error:
+            except Exception as error:
                 append_native_open_log(
                     {
                         "at": datetime.now().isoformat(timespec="seconds"),
@@ -1449,6 +2070,10 @@ class LauncherHandler(BaseHTTPRequestHandler):
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
+        # HTML/JS/CSS must never be served stale: a cached app.js silently
+        # reverts the native-open logic to the broken WPS associations.
+        # no-store (not no-cache) also wins without a manual ?v= bump.
+        self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
         self.end_headers()
         self.wfile.write(body)
 
