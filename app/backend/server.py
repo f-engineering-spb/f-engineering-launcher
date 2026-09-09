@@ -12,6 +12,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -36,6 +37,7 @@ WORD_CONVERT_SCRIPT = REPO_ROOT / "scripts" / "convert_word_to_pdf.ps1"
 EXCEL_CONVERT_SCRIPT = REPO_ROOT / "scripts" / "convert_excel_to_pdf.ps1"
 EXCEL_XLS_CONVERT_SCRIPT = REPO_ROOT / "scripts" / "convert_xls_to_xlsx.ps1"
 DWG_RENDER_SCRIPT = REPO_ROOT / "scripts" / "render_dwg_model_space.ps1"
+DWG_SMART_RENDER_SCRIPT = REPO_ROOT / "scripts" / "render_dwg_smart.ps1"
 DWG_REVIEW_OPEN_SCRIPT = REPO_ROOT / "scripts" / "open_dwg_review_copy.ps1"
 WORD_NATIVE_OPEN_SCRIPT = REPO_ROOT / "scripts" / "open_word_native.ps1"
 EXCEL_NATIVE_OPEN_SCRIPT = REPO_ROOT / "scripts" / "open_excel_native.ps1"
@@ -43,11 +45,11 @@ VERSION = "0.4.0-v3-pdf-render"
 SKIP_DIR_NAMES = {".git", "__pycache__", "node_modules", ".venv", "venv"}
 DEFAULT_PDF_DPI = 300
 PDF_PAGE_TIMEOUT_SECONDS = 25
-PDF_DOCUMENT_TIMEOUT_SECONDS = 75
+PDF_DOCUMENT_TIMEOUT_SECONDS = 600
 WORD_CONVERT_TIMEOUT_SECONDS = 120
 EXCEL_CONVERT_TIMEOUT_SECONDS = 180
-DWG_RENDER_TIMEOUT_SECONDS = 180
-DWG_MODEL_PAGE_TIMEOUT_SECONDS = 75
+DWG_RENDER_TIMEOUT_SECONDS = 600
+DWG_MODEL_PAGE_TIMEOUT_SECONDS = 120
 DWG_OPEN_TIMEOUT_SECONDS = 60
 NATIVE_OPEN_TIMEOUT_SECONDS = 60
 MAX_XLSX_ROWS = 2000
@@ -516,6 +518,21 @@ def poppler_tool(name: str) -> str | None:
     return found
 
 
+def hidden_process_kwargs() -> dict:
+    """Флаги скрытого запуска фоновых процессов: никаких чёрных окон консоли."""
+    if os.name != "nt":
+        return {}
+    try:
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        return {
+            "startupinfo": startupinfo,
+            "creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        }
+    except Exception:
+        return {}
+
+
 def run_poppler(args: list[str], timeout: int) -> subprocess.CompletedProcess[str]:
     process = subprocess.Popen(
         args,
@@ -524,6 +541,7 @@ def run_poppler(args: list[str], timeout: int) -> subprocess.CompletedProcess[st
         text=True,
         encoding="utf-8",
         errors="replace",
+        **hidden_process_kwargs(),
     )
     try:
         stdout, stderr = process.communicate(timeout=timeout)
@@ -602,6 +620,7 @@ def word_to_pdf(path: Path) -> tuple[Path, bool]:
         encoding="utf-8",
         errors="replace",
         timeout=WORD_CONVERT_TIMEOUT_SECONDS,
+        **hidden_process_kwargs(),
     )
     if process.returncode != 0:
         message = process.stderr.strip() or process.stdout.strip() or "Word не смог конвертировать документ в PDF"
@@ -640,24 +659,32 @@ def render_word(path: Path, dpi: int = DEFAULT_PDF_DPI) -> dict:
 
 
 def dwg_to_model_pdf(path: Path) -> tuple[Path, bool]:
-    """Create a cached read-only Model Space overview through installed ZWCAD.
+    """Экспорт чертежа DWG в многостраничный векторный PDF через ZWCAD COM.
 
-    This intentionally produces an overview, not editable CAD geometry and not
-    a substitute for sheets/layouts.  The source DWG is only opened read-only.
+    Сохраняет парный PDF рядом с исходным DWG-файлом (при наличии прав записи)
+    либо в резервный локальный кэш, если папка защищена от записи.
     """
     if not path.exists():
         raise FileNotFoundError(f"DWG-файл не найден: {path}")
     if not path.is_file() or path.suffix.casefold() != ".dwg":
         raise ValueError(f"Это не DWG-файл: {path}")
-    if not DWG_RENDER_SCRIPT.exists():
-        raise RuntimeError(f"Скрипт рендера DWG не найден: {DWG_RENDER_SCRIPT}")
 
-    key = file_cache_key(path, "dwg-model-a0-v1")
+    # 1. Проверяем парный PDF рядом с исходником DWG
+    paired_pdf = path.with_suffix(".pdf")
+    if paired_pdf.exists() and paired_pdf.is_file() and paired_pdf.stat().st_size > 1024:
+        try:
+            if paired_pdf.stat().st_mtime_ns >= path.stat().st_mtime_ns:
+                return paired_pdf, True
+        except OSError:
+            pass
+
+    # 2. Проверяем резервный кэш
+    key = file_cache_key(path, "dwg-smart-cad-v2")
     target_dir = DWG_CACHE_DIR / key
     target_dir.mkdir(parents=True, exist_ok=True)
-    pdf_path = target_dir / "model-space-a0.pdf"
+    fallback_pdf = target_dir / f"{path.stem}.pdf"
     manifest_path = target_dir / "manifest.json"
-    if pdf_path.exists() and pdf_path.stat().st_size > 1024 and manifest_path.exists():
+    if fallback_pdf.exists() and fallback_pdf.stat().st_size > 1024 and manifest_path.exists():
         try:
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             if (
@@ -666,12 +693,11 @@ def dwg_to_model_pdf(path: Path) -> tuple[Path, bool]:
                 and manifest.get("sourceMtimeNs") == path.stat().st_mtime_ns
                 and manifest.get("sourceSize") == path.stat().st_size
             ):
-                return pdf_path, True
+                return fallback_pdf, True
         except (OSError, json.JSONDecodeError):
             pass
 
-    if pdf_path.exists():
-        pdf_path.unlink()
+    script_to_run = DWG_SMART_RENDER_SCRIPT if DWG_SMART_RENDER_SCRIPT.exists() else DWG_RENDER_SCRIPT
     process = subprocess.run(
         [
             "powershell",
@@ -680,42 +706,67 @@ def dwg_to_model_pdf(path: Path) -> tuple[Path, bool]:
             "-ExecutionPolicy",
             "Bypass",
             "-File",
-            str(DWG_RENDER_SCRIPT),
+            str(script_to_run),
             "-InputPath",
             str(path),
             "-OutputPath",
-            str(pdf_path),
+            str(paired_pdf),
+            "-FallbackCachePath",
+            str(fallback_pdf),
+            "-PythonExe",
+            str(sys.executable),
         ],
         capture_output=True,
         text=True,
         encoding="utf-8",
         errors="replace",
         timeout=DWG_RENDER_TIMEOUT_SECONDS,
+        **hidden_process_kwargs(),
     )
     if process.returncode != 0:
-        message = process.stderr.strip() or process.stdout.strip() or "ZWCAD не смог создать Model Space preview"
+        message = process.stderr.strip() or process.stdout.strip() or "ZWCAD не смог создать PDF для чертежа"
         raise RuntimeError(message)
-    if not pdf_path.exists() or pdf_path.stat().st_size <= 1024:
-        raise RuntimeError("ZWCAD не создал PDF Model Space для preview")
 
-    manifest_path.write_text(
-        json.dumps(
-            {
-                "sourcePath": str(path),
-                "sourceName": path.name,
-                "sourceMtimeNs": path.stat().st_mtime_ns,
-                "sourceSize": path.stat().st_size,
-                "cacheKey": key,
-                "pdfPath": str(pdf_path),
-                "mode": "model-space-a0-extents-no-lineweights",
-                "renderedAt": datetime.now().isoformat(timespec="seconds"),
-            },
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
-    return pdf_path, False
+    final_pdf = None
+    if paired_pdf.exists() and paired_pdf.stat().st_size > 1024:
+        final_pdf = paired_pdf
+    elif fallback_pdf.exists() and fallback_pdf.stat().st_size > 1024:
+        final_pdf = fallback_pdf
+    else:
+        for line in reversed((process.stdout or "").splitlines()):
+            line = line.strip()
+            if line.startswith("{") and line.endswith("}"):
+                try:
+                    data = json.loads(line)
+                    cand = Path(data.get("finalPath", ""))
+                    if cand.exists() and cand.stat().st_size > 1024:
+                        final_pdf = cand
+                        break
+                except Exception:
+                    pass
+
+    if not final_pdf or not final_pdf.exists() or final_pdf.stat().st_size <= 1024:
+        raise RuntimeError("ZWCAD не создал PDF-файл для чертежа")
+
+    if final_pdf == fallback_pdf:
+        manifest_path.write_text(
+            json.dumps(
+                {
+                    "sourcePath": str(path),
+                    "sourceName": path.name,
+                    "sourceMtimeNs": path.stat().st_mtime_ns,
+                    "sourceSize": path.stat().st_size,
+                    "cacheKey": key,
+                    "pdfPath": str(fallback_pdf),
+                    "mode": "smart-layouts-fallback-cache",
+                    "renderedAt": datetime.now().isoformat(timespec="seconds"),
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+    return final_pdf, False
 
 
 def render_dwg_model(path: Path, dpi: int = DEFAULT_PDF_DPI) -> dict:
@@ -727,18 +778,25 @@ def render_dwg_model(path: Path, dpi: int = DEFAULT_PDF_DPI) -> dict:
     document["sourceType"] = "DWG"
     document["convertedPdfPath"] = str(pdf_path)
     document["convertCacheHit"] = convert_cache_hit
-    document["previewMode"] = "model-space-a0"
+    document["previewMode"] = "cad-smart-layouts"
     return document
 
 
 def launch_native_file(path: Path) -> str:
-    """Launch a file in its native desktop program reliably, bypassing broken system associations."""
-    if not path.exists() or not path.is_file():
+    """Показать файл или папку в Проводнике Windows без привязки к путям EXE."""
+    if not path.exists():
         raise FileNotFoundError(f"Файл не найден: {path}")
 
     if os.name != "nt":
         subprocess.Popen(["xdg-open", str(path)])
         return "xdg-open"
+
+    resolved = str(path.resolve())
+    if path.is_dir():
+        subprocess.Popen(["explorer.exe", resolved])
+        return "explorer-open-folder"
+    subprocess.Popen(["explorer.exe", "/select,", resolved])
+    return "explorer-select"
 
     try:
         import ctypes
@@ -937,6 +995,22 @@ def append_native_open_log(event: dict) -> None:
             log.write(line)
 
 
+IMPORT_LOG_LOCK = threading.Lock()
+
+
+def append_import_log(event: dict) -> None:
+    """Записать одну UTF-8 строку диагностики загрузки объекта в файл."""
+    try:
+        logs_dir = RUNTIME_DIR / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        line = json.dumps(event, ensure_ascii=False) + "\n"
+        with IMPORT_LOG_LOCK:
+            with (logs_dir / "import.jsonl").open("a", encoding="utf-8") as log:
+                log.write(line)
+    except Exception:
+        pass
+
+
 def excel_html_cache_dir(path: Path) -> Path:
     """Return an immutable cache location for one exact workbook revision."""
     return EXCEL_CACHE_DIR / "html" / file_cache_key(path, "excel-html")
@@ -998,6 +1072,7 @@ def excel_convert_xls_to_xlsx(path: Path) -> tuple[Path, bool]:
         encoding="utf-8",
         errors="replace",
         timeout=EXCEL_CONVERT_TIMEOUT_SECONDS,
+        **hidden_process_kwargs(),
     )
     if process.returncode != 0:
         message = process.stderr.strip() or process.stdout.strip() or "Excel не смог сконвертировать книгу XLS"
@@ -1308,6 +1383,7 @@ def excel_to_pdf(path: Path) -> tuple[Path, bool]:
         encoding="utf-8",
         errors="replace",
         timeout=EXCEL_CONVERT_TIMEOUT_SECONDS,
+        **hidden_process_kwargs(),
     )
     if process.returncode != 0:
         message = process.stderr.strip() or process.stdout.strip() or "Excel не смог экспортировать книгу в PDF"
@@ -1358,19 +1434,23 @@ def render_pdf(path: Path, dpi: int = DEFAULT_PDF_DPI, page_timeout_seconds: int
     if cached_manifest:
         cached_items = cached_manifest["items"]
         cached_errors = cached_manifest.get("errors", [])
-        return {
-            "name": path.name,
-            "path": str(path),
-            "dpi": dpi,
-            "pages": cached_manifest.get("pages", len(cached_items)),
-            "renderedPages": len(cached_items),
-            "cacheKey": key,
-            "cacheHit": True,
-            "cacheHitPages": len(cached_items),
-            "newRenderedPages": 0,
-            "errors": cached_errors,
-            "items": cached_items,
-        }
+        cached_total = cached_manifest.get("pages", len(cached_items)) or 0
+        if cached_total and len(cached_items) >= cached_total:
+            return {
+                "name": path.name,
+                "path": str(path),
+                "dpi": dpi,
+                "pages": cached_total,
+                "renderedPages": len(cached_items),
+                "cacheKey": key,
+                "cacheHit": True,
+                "cacheHitPages": len(cached_items),
+                "newRenderedPages": 0,
+                "errors": cached_errors,
+                "items": cached_items,
+            }
+        # Недоделанный кэш (обрезка по лимиту): не отдаём partial навсегда,
+        # а дорисовываем недостающие страницы ниже — готовые PNG reused.
 
     pdftoppm = poppler_tool("pdftoppm")
     if not pdftoppm:
@@ -1628,12 +1708,36 @@ class LauncherHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path == "/api/objects/import":
+            raw_path = ""
             try:
                 body = self.read_json()
-                manifest = scan_object(str(body.get("path", "")))
+                raw_path = str(body.get("path", ""))
+                manifest = scan_object(raw_path)
                 self.send_json(HTTPStatus.OK, manifest)
             except (ValueError, FileNotFoundError, NotADirectoryError, OSError, json.JSONDecodeError) as error:
+                append_import_log(
+                    {
+                        "at": datetime.now().isoformat(timespec="seconds"),
+                        "status": "error",
+                        "path": raw_path,
+                        "error": str(error),
+                    }
+                )
                 self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
+            except Exception as error:
+                append_import_log(
+                    {
+                        "at": datetime.now().isoformat(timespec="seconds"),
+                        "status": "unexpected-error",
+                        "path": raw_path,
+                        "error": "%s: %s" % (type(error).__name__, error),
+                        "traceback": traceback.format_exc(limit=12),
+                    }
+                )
+                self.send_json(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    {"error": "Загрузка не удалась (%s). Подробности записаны в runtime/logs/import.jsonl." % type(error).__name__},
+                )
             return
 
         if parsed.path == "/api/objects/exclude":
@@ -1687,7 +1791,10 @@ class LauncherHandler(BaseHTTPRequestHandler):
                     raw_path = str(REPO_ROOT)
                 target = Path(raw_path.strip('"')).resolve()
                 if target.exists():
-                    subprocess.Popen(["explorer.exe", str(target)])
+                    if target.is_dir():
+                        subprocess.Popen(["explorer.exe", str(target)])
+                    else:
+                        subprocess.Popen(["explorer.exe", "/select,", str(target)])
                     self.send_json(HTTPStatus.OK, {"ok": True, "path": str(target)})
                 else:
                     self.send_json(HTTPStatus.NOT_FOUND, {"error": f"Путь не найден: {target}"})
@@ -1698,13 +1805,18 @@ class LauncherHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/choose-folder":
             try:
                 choose_script = REPO_ROOT / "scripts" / "choose_folder.py"
+                choose_env = dict(os.environ)
+                choose_env["PYTHONUTF8"] = "1"
+                choose_env["PYTHONIOENCODING"] = "utf-8"
                 proc = subprocess.run(
                     [sys.executable, str(choose_script)],
                     capture_output=True,
                     text=True,
                     encoding="utf-8",
-                    errors="replace",
-                    timeout=15,
+                    errors="strict",
+                    timeout=120,
+                    env=choose_env,
+                    **hidden_process_kwargs(),
                 )
                 raw = proc.stdout.strip()
                 files = []
@@ -1716,12 +1828,13 @@ class LauncherHandler(BaseHTTPRequestHandler):
                             files = parsed_json
                             first_file = Path(files[0])
                             selected = str(first_file.parent if first_file.is_file() else first_file.resolve())
-                        elif isinstance(parsed_json, str):
-                            selected = parsed_json
+                        elif isinstance(parsed_json, str) and parsed_json.strip():
+                            p = Path(parsed_json.strip())
+                            selected = str(p.resolve()) if p.exists() else parsed_json.strip()
                     except json.JSONDecodeError:
                         first_line = raw.splitlines()[0].strip()
                         p = Path(first_line)
-                        selected = str(p.parent if p.is_file() else p.resolve())
+                        selected = str(p.resolve()) if p.exists() else first_line
                 self.send_json(HTTPStatus.OK, {"path": selected, "files": files})
             except subprocess.TimeoutExpired:
                 self.send_json(
@@ -1730,11 +1843,11 @@ class LauncherHandler(BaseHTTPRequestHandler):
                         "path": "",
                         "files": [],
                         "timedOut": True,
-                        "error": "Окно выбора файлов Windows не ответило за 15 секунд. Выберите объект из списка или укажите папку во встроенном проводнике.",
+                        "error": "Системный диалог выбора папки Windows не ответил за 120 секунд. Попробуйте ещё раз или укажите путь вручную.",
                     },
                 )
             except Exception as error:
-                self.send_json(HTTPStatus.OK, {"path": "", "files": [], "error": f"Диалог выбора файлов недоступен: {error}"})
+                self.send_json(HTTPStatus.OK, {"path": "", "files": [], "error": f"Системный диалог выбора папки недоступен: {error}"})
             return
 
         if parsed.path == "/api/pdf/render":
@@ -1975,10 +2088,10 @@ class LauncherHandler(BaseHTTPRequestHandler):
                 if not raw_file:
                     raise ValueError("Не выбран файл для открытия")
                 target = Path(raw_file).expanduser()
-                if not target.exists() or not target.is_file():
+                if not target.exists():
                     raise FileNotFoundError(f"Файл не найден: {target}")
                 opened_path = str(target)
-                suffix = target.suffix.casefold()
+                suffix = target.suffix.casefold() if target.is_file() else ""
                 # Google Drive shortcuts (.gsheet / .gdoc / .gslides) are virtual
                 # reparse points, not real Office documents.  Launching them
                 # through a local EXE is unpredictable, so give a clear hint.

@@ -79,8 +79,7 @@ button:hover:not(:disabled) { background: var(--active); }
 button:disabled { opacity: .45; cursor: default; }
 
 .progress-panel,
-.stats,
-.selection-summary {
+.stats {
   border: 1px solid var(--line);
   border-radius: 10px;
   background: rgba(255, 255, 255, .5);
@@ -228,8 +227,7 @@ textarea {
   white-space: nowrap;
 }
 
-.stats,
-.selection-summary {
+.stats {
   max-width: 100%;
   overflow: hidden;
   padding: 7px;
@@ -413,11 +411,21 @@ textarea {
   color: var(--ink);
 }
 
+/* Короткая подсветка строки дерева для файла активной миниатюры */
+.tree-row.thumb-reveal {
+  background: #e0f2fe;
+  outline: 2px solid #0284c7;
+  outline-offset: -2px;
+}
+
 .tree-children {
   position: relative;
   margin-left: 15px;
   padding-left: 12px;
-  border-left: 1px solid rgba(142, 166, 181, .58);
+}
+
+.tree-row > .tree-children {
+  grid-column: 1 / -1;
 }
 
 .tree-children > .tree-row::before {
@@ -427,6 +435,25 @@ textarea {
   width: 11px;
   border-top: 1px solid rgba(142, 166, 181, .58);
   content: "";
+}
+
+/* Вертикаль рисуется по строкам, а не рамкой контейнера:
+   у последней вложенной строки линия заканчивается на ней
+   и не торчит вниз в никуда. */
+.tree-children > .tree-row::after {
+  position: absolute;
+  left: -13px;
+  top: 0;
+  border-left: 1px solid rgba(142, 166, 181, .58);
+  content: "";
+}
+
+.tree-children > .tree-row:not(:last-child)::after {
+  bottom: -6px;
+}
+
+.tree-children > .tree-row:last-child::after {
+  height: 50%;
 }
 
 .tree-children > .tree-row {
@@ -526,11 +553,42 @@ textarea {
   grid-template-columns: minmax(0, 1fr);
 }
 
+/* Средний режим: лента миниатюр на всю ширину, а от сцены остаётся
+   только тонкая полоса панели — переключатели режимов доступны везде.
+   Панель управления обязана иметь правило скрытия: её display:flex
+   иначе перебивает скрывающий атрибут. */
+.viewer-controls[hidden] {
+  display: none;
+}
+
+.shell.medium-view .pdf-viewer {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) auto;
+}
+
+.shell.medium-view .pdf-stage {
+  display: flex;
+  justify-content: center;
+  padding: 4px;
+  min-height: 0;
+  overflow: visible;
+}
+
+.shell.medium-view .pdf-stage > :not(.viewer-controls) {
+  display: none;
+}
+
+.shell.medium-view .viewer-controls {
+  position: static;
+  transform: none;
+}
+
 .shell.full-view .pdf-thumbs {
   display: none;
 }
 
 .pdf-thumbs {
+  --thumb-scale: 1;
   min-width: 0;
   min-height: 0;
   overflow: auto;
@@ -564,7 +622,7 @@ textarea {
 .pdf-thumb img {
   display: block;
   width: 100%;
-  max-height: 165px;
+  max-height: calc(165px * var(--thumb-scale));
   object-fit: contain;
   border: 1px solid rgba(200, 204, 208, .9);
   background: #fff;
@@ -835,32 +893,6 @@ textarea {
   color: var(--muted);
   background: rgba(255, 255, 255, .72);
   text-align: center;
-}
-
-.diff-summary {
-  padding: 6px 10px;
-  border: 1px solid #c9d4de;
-  border-radius: 8px;
-  background: #eef3f7;
-  color: #314f6e;
-  font: 600 12px/1.35 "Segoe UI", system-ui, sans-serif;
-  cursor: default;
-}
-
-.diff-filter-toggle {
-  margin-top: 6px;
-  padding: 5px 12px;
-  border: 1px solid #b7c3ce;
-  border-radius: 999px;
-  background: #f7fafc;
-  color: #314f6e;
-  font: 600 12px/1.2 "Segoe UI", system-ui, sans-serif;
-  cursor: pointer;
-}
-
-.diff-filter-toggle.active {
-  background: #dbe7f2;
-  border-color: #6f8aa8;
 }
 
 .diff-badge {
@@ -1388,41 +1420,6 @@ textarea {
   color: #0369a1;
 }
 
-.summary-single {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-}
-
-.summary-file-name {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 11px;
-  color: var(--text);
-}
-
-.summary-open-btn {
-  background: #0284c7;
-  color: #ffffff;
-  border: 1px solid #0369a1;
-  border-radius: 6px;
-  font-size: 11px;
-  font-weight: 600;
-  padding: 3px 9px;
-  min-height: 22px;
-  cursor: pointer;
-  white-space: nowrap;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
-  transition: all 0.1s;
-}
-
-.summary-open-btn:hover {
-  background: #0369a1;
-}
-
 .native-file-card {
   display: flex;
   flex-direction: column;
@@ -1480,9 +1477,72 @@ textarea {
   min-height: 34px;
 }
 
+.native-file-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+.native-file-copy-btn {
+  font-size: 13px;
+  padding: 8px 16px;
+  min-height: 34px;
+}
+
 #openNativeFile {
   min-width: 68px;
   white-space: nowrap;
   font-weight: 600;
   padding: 0 10px;
+}
+
+#copyNativePath {
+  min-width: 34px;
+  font-weight: 700;
+  padding: 0 8px;
+}
+
+/* Обёртка миниатюры с кнопками пути: как в дереве, но для ленты */
+.thumb-wrap {
+  position: relative;
+  margin: 0 0 7px;
+}
+
+.thumb-wrap .pdf-thumb {
+  margin: 0;
+}
+
+.thumb-actions {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: flex;
+  gap: 4px;
+  opacity: 0;
+  transition: opacity .12s ease;
+}
+
+.thumb-wrap:hover .thumb-actions,
+.thumb-wrap:focus-within .thumb-actions {
+  opacity: 1;
+}
+
+.thumb-icon-btn {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid rgba(102, 127, 153, .55);
+  border-radius: 5px;
+  background: rgba(255, 255, 255, .94);
+  color: #334155;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.thumb-icon-btn:hover {
+  border-color: #0284c7;
+  background: #e0f2fe;
+  color: #0369a1;
 }

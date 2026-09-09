@@ -15,6 +15,7 @@ const state = {
   activePageUrl: "",
   activePageKey: "",
   activeNativePath: "",
+  revealedPath: "",
   excelWorkbook: null,
   excelWorkbooks: [],
   excelWorkbookIndex: 0,
@@ -32,10 +33,12 @@ const state = {
   lastOpenPath: "",
   lastOpenAt: 0,
   viewMode: "standard",
+  thumbScale: 1,
   view: {
     scale: 1,
     fitScale: 1,
     rotation: 0,
+    userZoomed: false,
     panX: 0,
     panY: 0,
     panMode: true,
@@ -45,37 +48,11 @@ const state = {
     dragPanX: 0,
     dragPanY: 0,
   },
-  modal: {
-    activeTab: "quick",
-    currentBrowsePath: "",
-    browseData: null,
-  },
 };
 
 const els = {
   shell: document.querySelector(".shell"),
   load: document.getElementById("loadObject"),
-  loadModal: document.getElementById("loadModal"),
-  closeLoadModal: document.getElementById("closeLoadModal"),
-  tabQuick: document.getElementById("tabQuick"),
-  tabBrowse: document.getElementById("tabBrowse"),
-  tabPath: document.getElementById("tabPath"),
-  paneQuick: document.getElementById("paneQuick"),
-  paneBrowse: document.getElementById("paneBrowse"),
-  panePath: document.getElementById("panePath"),
-  quickProjectsList: document.getElementById("quickProjectsList"),
-  drivesBar: document.getElementById("drivesBar"),
-  browserBreadcrumbs: document.getElementById("browserBreadcrumbs"),
-  browserFoldersList: document.getElementById("browserFoldersList"),
-  browserStats: document.getElementById("browserStats"),
-  browserFilesList: document.getElementById("browserFilesList"),
-  btnLoadBrowsedFolder: document.getElementById("btnLoadBrowsedFolder"),
-  btnOpenInWindowsExplorer: document.getElementById("btnOpenInWindowsExplorer"),
-  manualPathInput: document.getElementById("manualPathInput"),
-  btnLoadManualPath: document.getElementById("btnLoadManualPath"),
-  btnTriggerSystemPicker: document.getElementById("btnTriggerSystemPicker"),
-  systemPickerStatus: document.getElementById("systemPickerStatus"),
-  modalDropZone: document.getElementById("modalDropZone"),
   refresh: document.getElementById("refreshObject"),
   display: document.getElementById("displayObject"),
   exclude: document.getElementById("excludeObject"),
@@ -93,7 +70,6 @@ const els = {
   backToTree: document.getElementById("backToTree"),
   treeSearch: document.getElementById("treeSearch"),
   formatStrip: document.getElementById("formatStrip"),
-  selectionSummary: document.getElementById("selectionSummary"),
   objectTree: document.getElementById("objectTree"),
   pdfThumbs: document.getElementById("pdfThumbs"),
   pdfViewer: document.getElementById("pdfViewer"),
@@ -114,11 +90,10 @@ const els = {
   viewRotate: document.getElementById("viewRotate"),
   viewPanMode: document.getElementById("viewPanMode"),
   openNativeFile: document.getElementById("openNativeFile"),
+  copyNativePath: document.getElementById("copyNativePath"),
   viewStandardMode: document.getElementById("viewStandardMode"),
   viewMediumMode: document.getElementById("viewMediumMode"),
   viewFullMode: document.getElementById("viewFullMode"),
-  diffSummary: document.getElementById("diffSummary"),
-  diffFilterToggle: document.getElementById("diffFilterToggle"),
 };
 
 function text(value, fallback = "") {
@@ -248,6 +223,7 @@ function startProgress(label, detail) {
   stopProgress(false, false);
   state.progressCancelled = false;
   let value = 0;
+  els.progressFill.classList.remove("is-error");
   els.progressPanel.hidden = false;
   els.progressLabel.textContent = label;
   els.progressDetail.textContent = detail;
@@ -386,10 +362,8 @@ function fileExtensionFromPath(path = "") {
 
 async function openFileByPath(path) {
   if (!path) return;
-  const ext = fileExtensionFromPath(path);
-  const appLabel = getNativeAppLabel(ext);
-  console.log(`[Launcher] Opening in ${appLabel}:`, path);
-  startProgress(`Открытие в ${appLabel}`, path);
+  console.log("[Launcher] Reveal in Windows Explorer:", path);
+  startProgress("Открытие в Проводнике Windows", path);
   try {
     const response = await fetch("/api/open-file", {
       method: "POST",
@@ -398,10 +372,10 @@ async function openFileByPath(path) {
     });
     const payload = await response.json();
     if (!response.ok) throw new Error(payload.error || "Файл не открыт");
-    finishProgress(`Файл открыт: ${appLabel}`);
+    finishProgress("Файл показан в Проводнике Windows");
     if (payload.longPathWarning) showNotice(payload.longPathWarning);
   } catch (error) {
-    console.error("[Launcher] Failed to open native file:", error);
+    console.error("[Launcher] Failed to reveal file in Explorer:", error);
     showOperationError(error);
   }
 }
@@ -426,216 +400,29 @@ function escapeHtml(value = "") {
     .replace(/'/g, "&#39;");
 }
 
-function openLoadModal() {
-  if (!els.loadModal) return;
-  els.loadModal.hidden = false;
-  switchModalTab(state.modal.activeTab || "quick");
-  refreshBrowseData(state.modal.currentBrowsePath || "").catch(console.error);
-}
-
-function closeLoadModal() {
-  if (!els.loadModal) return;
-  els.loadModal.hidden = true;
-  if (els.systemPickerStatus) {
-    els.systemPickerStatus.hidden = true;
-    els.systemPickerStatus.textContent = "";
-  }
-}
-
-function switchModalTab(tabName) {
-  state.modal.activeTab = tabName;
-  const tabs = [
-    { name: "quick", btn: els.tabQuick, pane: els.paneQuick },
-    { name: "browse", btn: els.tabBrowse, pane: els.paneBrowse },
-    { name: "path", btn: els.tabPath, pane: els.panePath },
-  ];
-  tabs.forEach((t) => {
-    if (t.btn && t.pane) {
-      if (t.name === tabName) {
-        t.btn.classList.add("active");
-        t.pane.classList.add("active");
-      } else {
-        t.btn.classList.remove("active");
-        t.pane.classList.remove("active");
-      }
-    }
-  });
-  if (tabName === "path" && els.manualPathInput) {
-    setTimeout(() => els.manualPathInput.focus(), 50);
-  }
-}
-
-async function refreshBrowseData(targetPath = "") {
-  try {
-    const url = targetPath ? `/api/browse?path=${encodeURIComponent(targetPath)}` : "/api/browse";
-    const response = await fetch(url);
-    if (!response.ok) return;
-    const data = await response.json();
-    state.modal.browseData = data;
-    state.modal.currentBrowsePath = data.current || targetPath;
-
-    renderQuickProjects(data.quickProjects || []);
-    renderBrowserDrives(data.drives || [], data.current || "");
-    renderBrowserBreadcrumbs(data.current || "");
-    renderBrowserFolders(data.folders || [], data.parent);
-    renderBrowserPreview(data.files || [], data.stats || {}, data.current || "");
-  } catch (err) {
-    console.warn("Failed to refresh browse data:", err);
-  }
-}
-
-function renderQuickProjects(projects) {
-  if (!els.quickProjectsList) return;
-  if (!projects.length) {
-    els.quickProjectsList.innerHTML = '<div class="loading-spin">Проекты не найдены. Воспользуйтесь проводником по папкам.</div>';
-    return;
-  }
-  els.quickProjectsList.innerHTML = projects.map((proj) => `
-    <div class="quick-project-card">
-      <div class="quick-project-info">
-        <div class="quick-project-name">📁 ${escapeHtml(proj.name)}</div>
-        <div class="quick-project-path" title="${escapeHtml(proj.path)}">${escapeHtml(proj.path)}</div>
-      </div>
-      <button class="primary-btn quick-load-btn" data-path="${escapeHtml(proj.path)}" type="button">Загрузить</button>
-    </div>
-  `).join("");
-
-  els.quickProjectsList.querySelectorAll(".quick-load-btn").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const p = btn.getAttribute("data-path");
-      if (p) importObjectByPath(p).catch(showOperationError);
-    });
-  });
-}
-
-function renderBrowserDrives(drives, currentPath) {
-  if (!els.drivesBar) return;
-  els.drivesBar.innerHTML = drives.map((d) => {
-    const isActive = currentPath.toLowerCase().startsWith(d.path.toLowerCase());
-    return `<button class="drive-btn ${isActive ? 'active' : ''}" data-path="${escapeHtml(d.path)}" type="button">${escapeHtml(d.label || d.letter)}</button>`;
-  }).join("");
-
-  els.drivesBar.querySelectorAll(".drive-btn").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const p = btn.getAttribute("data-path");
-      if (p) refreshBrowseData(p).catch(console.error);
-    });
-  });
-}
-
-function renderBrowserBreadcrumbs(currentPath) {
-  if (!els.browserBreadcrumbs) return;
-  if (!currentPath) {
-    els.browserBreadcrumbs.innerHTML = "";
-    return;
-  }
-  const parts = currentPath.split(/[/\\]+/).filter(Boolean);
-  let accumulated = "";
-  const crumbs = [];
-
-  parts.forEach((part, index) => {
-    if (index === 0 && currentPath.includes(":\\\\")) {
-      accumulated = part + "\\\\";
-    } else {
-      accumulated += (accumulated.endsWith("\\\\") ? "" : "\\\\") + part;
-    }
-    crumbs.push({ name: part, path: accumulated });
-  });
-
-  els.browserBreadcrumbs.innerHTML = crumbs.map((crumb, i) => `
-    ${i > 0 ? '<span class="breadcrumb-sep">›</span>' : ''}
-    <button class="breadcrumb-crumb" data-path="${escapeHtml(crumb.path)}" type="button">${escapeHtml(crumb.name)}</button>
-  `).join("");
-
-  els.browserBreadcrumbs.querySelectorAll(".breadcrumb-crumb").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const p = btn.getAttribute("data-path");
-      if (p) refreshBrowseData(p).catch(console.error);
-    });
-  });
-}
-
-function renderBrowserFolders(folders, parentPath) {
-  if (!els.browserFoldersList) return;
-  const items = [];
-  if (parentPath) {
-    items.push(`<div class="browser-folder-item" data-path="${escapeHtml(parentPath)}">📁 <strong>.. (Вверх)</strong></div>`);
-  }
-  folders.forEach((f) => {
-    items.push(`<div class="browser-folder-item" data-path="${escapeHtml(f.path)}">📁 ${escapeHtml(f.name)}</div>`);
-  });
-
-  if (!items.length) {
-    els.browserFoldersList.innerHTML = '<div class="loading-spin">Папка пуста</div>';
-    return;
-  }
-
-  els.browserFoldersList.innerHTML = items.join("");
-  els.browserFoldersList.querySelectorAll(".browser-folder-item").forEach((item) => {
-    item.addEventListener("click", () => {
-      const p = item.getAttribute("data-path");
-      if (p) refreshBrowseData(p).catch(console.error);
-    });
-  });
-}
-
-function renderBrowserPreview(files, stats, currentPath) {
-  if (els.browserStats) {
-    const parts = [];
-    if (stats.dwg) parts.push(`DWG: ${stats.dwg}`);
-    if (stats.pdf) parts.push(`PDF: ${stats.pdf}`);
-    if (stats.excel) parts.push(`Excel: ${stats.excel}`);
-    if (stats.word) parts.push(`Word: ${stats.word}`);
-    const summary = parts.length ? parts.join(" · ") : "Файлов проекта не обнаружено";
-    els.browserStats.textContent = `${summary} (всего файлов: ${files.length})`;
-  }
-  if (els.browserFilesList) {
-    if (!files.length) {
-      els.browserFilesList.innerHTML = '<div class="loading-spin">Нет файлов</div>';
-      return;
-    }
-    els.browserFilesList.innerHTML = files.slice(0, 30).map((f) => `
-      <div class="browser-file-item" title="${escapeHtml(f.name)}">📄 ${escapeHtml(f.name)}</div>
-    `).join("");
-  }
-}
-
-async function openInWindowsExplorer(path) {
-  if (!path) return;
-  try {
-    await fetch("/api/open-explorer", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ path }),
-    });
-  } catch (err) {
-    console.warn("Could not open explorer:", err);
-  }
-}
-
 async function triggerSystemPicker() {
-  if (!els.systemPickerStatus) return;
-  els.systemPickerStatus.hidden = false;
-  els.systemPickerStatus.textContent = "⏳ Ожидание выбора в стандартном окне Windows…";
+  // Единственный механизм загрузки: системный диалог выбора папки Windows.
+  // Никаких самописных окон и никакого прогресса в ожидании:
+  // просто открывается окно, выбирается папка, дальше идёт загрузка.
   try {
     const res = await fetch("/api/choose-folder", { method: "POST" });
     const data = await res.json();
     if (data.path) {
-      els.systemPickerStatus.textContent = `Выбрано: ${data.path}`;
       await importObjectByPath(data.path);
-    } else if (data.error) {
-      els.systemPickerStatus.textContent = data.error;
-    } else {
-      els.systemPickerStatus.textContent = "Выбор отменён.";
+      return data.path;
     }
+    if (data.error) {
+      showOperationError(new Error(data.error));
+    }
+    return "";
   } catch (err) {
-    els.systemPickerStatus.textContent = `Ошибка: ${err.message}`;
+    showOperationError(err);
+    return "";
   }
 }
 
 async function importObjectByPath(path, forceRefresh = false) {
   if (!path || !path.trim()) return;
-  closeLoadModal();
   const controller = createOperationController();
   startProgress(forceRefresh ? "Обновление объекта" : "Загрузка объекта", path);
   try {
@@ -662,9 +449,13 @@ async function importObject(forceRefresh = false) {
     if (object?.rootPath) {
       await importObjectByPath(object.rootPath, true);
     }
-  } else {
-    openLoadModal();
+    return;
   }
+  // Единственный сценарий: системный диалог выбора папки Windows.
+  await triggerSystemPicker().catch((err) => {
+    console.warn("[Launcher] System folder picker failed:", err);
+    showOperationError(err);
+  });
 }
 
 
@@ -996,31 +787,6 @@ function buildDiffState(manifest, previousManifest) {
   };
 }
 
-function renderDiffSummary() {
-  const summary = state.diffSummary;
-  if (!summary || !(summary.added || summary.changed || summary.removed)) {
-    if (els.diffSummary) els.diffSummary.hidden = true;
-    if (els.diffFilterToggle) els.diffFilterToggle.hidden = true;
-    return;
-  }
-  if (els.diffSummary) {
-    els.diffSummary.hidden = false;
-    els.diffSummary.textContent =
-      `Добавлено: ${summary.added} · Изменено: ${summary.changed} · Удалено: ${summary.removed}`;
-    els.diffSummary.title = `Без изменений: ${summary.unchanged}`;
-  }
-  if (els.diffFilterToggle) {
-    els.diffFilterToggle.hidden = false;
-    els.diffFilterToggle.classList.toggle("active", state.diffFilter);
-  }
-}
-
-function toggleDiffFilter() {
-  state.diffFilter = !state.diffFilter;
-  renderDiffSummary();
-  renderTree();
-}
-
 function startDiffPolling() {
   stopDiffPolling();
   if (!state.selectedObjectId) return;
@@ -1076,7 +842,6 @@ async function refreshObjectInPlace() {
   await loadObjectSummaries();
   renderFormats();
   renderTree();
-  renderDiffSummary();
   finishProgress(hasDiffChanges(payload) ? "Обнаружены изменения" : "Изменений нет");
   if (state.renderedPages.length && state.selectedPaths.size) {
     renderSelectedFiles().catch(showOperationError);
@@ -1086,43 +851,6 @@ async function refreshObjectInPlace() {
 function hasDiffChanges(manifest) {
   const diff = manifest?.lastDiff;
   return Boolean(diff && ((diff.added || []).length || (diff.changed || []).length || (diff.removed || []).length));
-}
-
-function updateSelectionSummary() {
-  const selected = [...state.selectedPaths];
-  if (!selected.length) {
-    els.selectionSummary.textContent = "Выделение пустое";
-    return;
-  }
-  const selectedNodes = state.visibleRows.filter((item) => state.selectedPaths.has(item.path));
-  const files = selectedNodes.filter((item) => item.type === "file").length;
-  const folders = selectedNodes.filter((item) => item.type === "folder").length;
-
-  if (selected.length === 1 && selectedNodes.length === 1 && selectedNodes[0].type === "file") {
-    const singleNode = selectedNodes[0];
-    const appLabel = getNativeAppLabel(singleNode.extension);
-    els.selectionSummary.innerHTML = `
-      <div class="summary-single">
-        <span class="summary-file-name" title="${escapeHtml(singleNode.name)}">${escapeHtml(singleNode.name)}</span>
-        <button class="summary-open-btn" id="summaryOpenBtn" type="button" title="Открыть файл в ${escapeHtml(appLabel)}">
-          ↗ ${escapeHtml(appLabel)}
-        </button>
-      </div>
-    `;
-    const btn = els.selectionSummary.querySelector("#summaryOpenBtn");
-    if (btn) {
-      btn.addEventListener("click", (e) => {
-        e.stopPropagation();
-        openFileByPath(singleNode.path).catch(showOperationError);
-      });
-    }
-    return;
-  }
-
-  const dwgFiles = selectedNodes.filter((item) => item.type === "file" && item.extension === "DWG");
-  const dwgWithPdf = dwgFiles.filter((item) => findPdfPairForDwg(item, state.pdfPairIndex)).length;
-  const dwgText = dwgFiles.length ? ` · DWG с PDF: ${dwgWithPdf}/${dwgFiles.length}` : "";
-  els.selectionSummary.textContent = `Выбрано: ${selected.length} · файлов: ${files} · папок: ${folders}${dwgText}`;
 }
 
 function selectNode(node, event) {
@@ -1149,11 +877,14 @@ function selectNode(node, event) {
     const selectedItem = state.visibleRows.find((item) => item.path === selectedPath);
     if (selectedItem && selectedItem.type === "file") {
       setActiveNativePath(selectedItem.path);
+      state.revealedPath = selectedItem.path;
     } else {
       setActiveNativePath("");
+      state.revealedPath = "";
     }
   } else {
     setActiveNativePath("");
+    state.revealedPath = "";
   }
   renderTree();
 }
@@ -1162,7 +893,6 @@ async function copyPathToClipboard(path) {
   if (!path) return;
   try {
     await navigator.clipboard.writeText(path);
-    els.selectionSummary.textContent = "Путь скопирован";
   } catch {
     const fallback = document.createElement("textarea");
     fallback.value = path;
@@ -1173,9 +903,43 @@ async function copyPathToClipboard(path) {
     fallback.select();
     document.execCommand("copy");
     fallback.remove();
-    els.selectionSummary.textContent = "Путь скопирован";
   }
-  window.setTimeout(updateSelectionSummary, 1100);
+}
+
+function revealPathInTree(path) {
+  // Файл активной миниатюры в дереве подсвечен постоянно, пока стоим на нём:
+  // одна запись в дереве — один подсвеченный файл, сколько бы страниц
+  // у него ни было в ленте. Выделение синхронизируем с просмотром,
+  // чтобы в дереве всегда была ровно одна активная строка.
+  if (!path || !state.currentManifest?.tree || !els.objectTree) return;
+  const docChanged = state.revealedPath !== path;
+  state.revealedPath = path;
+  let needsRender = docChanged;
+  if (state.selectedPaths.size !== 1 || !state.selectedPaths.has(path)) {
+    state.selectedPaths.clear();
+    state.selectedPaths.add(path);
+    needsRender = true;
+  }
+  const nodeIndex = state.visibleRows.findIndex((item) => item.path === path);
+  if (nodeIndex >= 0) state.lastSelectedIndex = nodeIndex;
+  const norm = String(path).replace(/\//g, "\\").toLowerCase();
+  [...state.collapsedFolders].forEach((folderPath) => {
+    const folderNorm = String(folderPath).replace(/\//g, "\\").toLowerCase();
+    if (norm === folderNorm || norm.startsWith(folderNorm + "\\")) {
+      state.collapsedFolders.delete(folderPath);
+      needsRender = true;
+    }
+  });
+  if (needsRender) renderTree();
+  let row = null;
+  try {
+    row = els.objectTree.querySelector(`.tree-row[data-path="${CSS.escape(path)}"]`);
+  } catch {
+    row = null;
+  }
+  if (row) {
+    row.scrollIntoView({ block: "nearest", behavior: docChanged ? "smooth" : "auto" });
+  }
 }
 
 function renderTreeNode(node, parent) {
@@ -1183,6 +947,7 @@ function renderTreeNode(node, parent) {
   const row = document.createElement("div");
   row.className = `tree-row ${node.type}`;
   row.dataset.path = node.path;
+  if (node.path === state.revealedPath) row.classList.add("thumb-reveal");
   row.classList.toggle("selected", state.selectedPaths.has(node.path));
   row.title = node.path;
   const collapsed = state.collapsedFolders.has(node.path);
@@ -1239,8 +1004,7 @@ function renderTreeNode(node, parent) {
     openButton.type = "button";
     openButton.className = "open-native-row-button";
     openButton.textContent = "↗";
-    const appLabel = getNativeAppLabel(node.extension);
-    openButton.title = `Открыть в ${appLabel}`;
+    openButton.title = "Показать файл в Проводнике Windows";
     openButton.setAttribute("aria-label", openButton.title);
     openButton.addEventListener("click", (event) => {
       event.stopPropagation();
@@ -1282,7 +1046,7 @@ function renderTreeNode(node, parent) {
     const children = document.createElement("div");
     children.className = "tree-children";
     node.children.forEach((child) => renderTreeNode(child, children));
-    parent.append(children);
+    row.append(children);
   }
 }
 
@@ -1333,7 +1097,6 @@ function renderTree() {
     empty.className = "empty-note";
     empty.textContent = "Дерево ещё не открыто.";
     els.objectTree.append(empty);
-    updateSelectionSummary();
     return;
   }
   state.pdfPairIndex = buildPdfPairIndex(flattenTree(state.currentManifest.tree, []));
@@ -1372,7 +1135,6 @@ function renderTree() {
     empty.textContent = "Поиск или фильтр ничего не нашли.";
     els.objectTree.append(empty);
   }
-  updateSelectionSummary();
 }
 
 async function openSelectedObject() {
@@ -1385,12 +1147,12 @@ async function openSelectedObject() {
   if (!response.ok) throw new Error(manifest.error || "Объект не открыт");
   state.currentManifest = manifest;
   state.selectedPaths.clear();
+  state.revealedPath = "";
   state.activeFilter = "";
   state.diffFilter = false;
   state.collapsedFolders.clear();
   state.renderedPages = [];
   buildDiffState(manifest, null);
-  renderDiffSummary();
   setMode("tree");
   setTreeBrowseMode(true);
   renderFormats();
@@ -1513,8 +1275,13 @@ function collectPreviewFilesForDisplay() {
     selectedNodes.forEach((node) => {
       if (node.type === "file") addPreviewFile(node);
       if (node.type === "folder") {
+        // Строго внутри папки: через разделитель, иначе папка «Договор»
+        // захватывала бы соседнюю папку «Договор №2» как свою часть.
+        const prefixBack = `${node.path}\\`;
+        const prefixSlash = `${node.path}/`;
         allNodes
-          .filter((candidate) => candidate.path !== node.path && candidate.path.startsWith(node.path))
+          .filter((candidate) => candidate.path !== node.path
+            && (candidate.path.startsWith(prefixBack) || candidate.path.startsWith(prefixSlash)))
           .forEach(addPreviewFile);
       }
     });
@@ -1538,6 +1305,7 @@ function clearExcelViewer() {
 }
 
 function resetPdfPreview() {
+  state.view.userZoomed = false;
   state.activePageKey = "";
   state.activePageUrl = "";
   state.renderedPages = [];
@@ -1597,6 +1365,8 @@ async function warmExcelWorkbook(workbook, activeIndex) {
 function renderExcelWorkbookRail() {
   els.pdfThumbs.replaceChildren();
   state.excelWorkbooks.forEach((workbook, index) => {
+    const wrap = document.createElement("div");
+    wrap.className = "thumb-wrap";
     const thumb = document.createElement("button");
     thumb.type = "button";
     thumb.className = "pdf-thumb excel-book-thumb";
@@ -1613,13 +1383,16 @@ function renderExcelWorkbookRail() {
     label.textContent = workbook.name;
     thumb.append(preview, label);
     thumb.addEventListener("click", () => activateExcelWorkbook(index).catch(showOperationError));
-    els.pdfThumbs.append(thumb);
+    wrap.append(thumb, createThumbPathActions(() => workbook.path || ""));
+    els.pdfThumbs.append(wrap);
   });
 }
 
 async function activateExcelWorkbook(index) {
   const workbook = state.excelWorkbooks[index];
   if (!workbook) return;
+  // Во втором режиме сцены нет — книгу сразу открываем на весь экран.
+  if (state.viewMode === "medium") setViewerMode("full");
   state.excelWorkbook = workbook;
   state.excelWorkbookIndex = index;
   state.excelSheetIndex = 0;
@@ -1648,6 +1421,7 @@ async function activateExcelWorkbook(index) {
   els.viewRotate.hidden = false;
   els.viewPanMode.hidden = false;
   setActiveNativePath(workbook.path);
+  revealPathInTree(workbook.path);
   updateViewTransform();
   await activateExcelSheet(0);
   window.setTimeout(() => warmExcelWorkbook(workbook, 0), 250);
@@ -1678,6 +1452,8 @@ function renderPdfViewer(pages) {
 
   pages.forEach((page) => {
     const key = pageKey(page);
+    const wrap = document.createElement("div");
+    wrap.className = "thumb-wrap";
     const thumb = document.createElement("button");
     thumb.type = "button";
     thumb.className = "pdf-thumb";
@@ -1709,7 +1485,15 @@ function renderPdfViewer(pages) {
     label.textContent = page.name;
     thumb.append(label);
     thumb.addEventListener("click", () => showPdfPage(page));
-    els.pdfThumbs.append(thumb);
+    // Одиночный щелчок уже показал страницу (и подсветил файл в дереве),
+    // поэтому двойной только переключает режим — без повторной загрузки,
+    // которая и давала полстраницы.
+    thumb.addEventListener("dblclick", () => {
+      setViewerMode("full");
+    });
+    thumb.title = `${page.name} · двойной щелчок — на весь экран`;
+    wrap.append(thumb, createThumbPathActions(() => thumbPathForPage(page)));
+    els.pdfThumbs.append(wrap);
   });
 
   const currentPage = pages.find((page) => pageKey(page) === state.activePageKey);
@@ -1717,10 +1501,15 @@ function renderPdfViewer(pages) {
     updateActivePdfThumb();
     return;
   }
-  // The active page belongs to a previous file selection.  Show the first
-  // page of the newly rendered set and drop the stale large image so the
-  // viewer never keeps showing the old document.
-  showPdfPage(pages[0]);
+  // Показ первой страницы — только для свежего выбора, когда активной
+  // страницы ещё нет. При постепенной дорисовке ленты текущий документ
+  // не уводим: иначе каждый готовый пакет дёргал бы просмотр и дерево
+  // обратно к первому документу.
+  if (!state.activePageKey && pages.length) {
+    showPdfPage(pages[0]);
+    return;
+  }
+  updateActivePdfThumb();
 }
 
 function pageKey(page) {
@@ -1744,12 +1533,15 @@ function setQualityBadge(textValue, mode = "") {
 function setActiveNativePath(path) {
   state.activeNativePath = path || "";
   els.openNativeFile.hidden = !state.activeNativePath;
+  if (els.copyNativePath) els.copyNativePath.hidden = !state.activeNativePath;
   if (!state.activeNativePath) return;
 
-  const ext = fileExtensionFromPath(state.activeNativePath);
-  const appLabel = getNativeAppLabel(ext);
-  els.openNativeFile.textContent = "Открыть";
-  els.openNativeFile.title = `Открыть исходный файл в ${appLabel} (${state.activeNativePath})`;
+  els.openNativeFile.textContent = "Открыть в Проводнике";
+  els.openNativeFile.title = `Показать файл в Проводнике Windows (${state.activeNativePath})`;
+  if (els.copyNativePath) {
+    els.copyNativePath.title = `Скопировать путь (${state.activeNativePath})`;
+    els.copyNativePath.setAttribute("aria-label", "Скопировать путь к файлу");
+  }
   if (els.viewerControls) els.viewerControls.hidden = false;
 }
 
@@ -1758,16 +1550,41 @@ async function openActiveNativeFile() {
   await openFileByPath(state.activeNativePath);
 }
 
+function thumbPathForPage(page) {
+  if (!page) return "";
+  return page.previewFor?.path || page.sourcePath || page.documentPath || page.path || "";
+}
+
+function createThumbPathActions(getPath) {
+  const box = document.createElement("div");
+  box.className = "thumb-actions";
+  const copyBtn = document.createElement("button");
+  copyBtn.type = "button";
+  copyBtn.className = "thumb-icon-btn";
+  copyBtn.textContent = "⧉";
+  copyBtn.title = "Скопировать путь";
+  copyBtn.setAttribute("aria-label", "Скопировать путь");
+  copyBtn.addEventListener("click", (event) => {
+    event.stopPropagation();
+    event.preventDefault();
+    copyPathToClipboard(getPath());
+  });
+  const openBtn = document.createElement("button");
+  openBtn.type = "button";
+  openBtn.className = "thumb-icon-btn";
+  openBtn.textContent = "↗";
+  openBtn.title = "Показать в Проводнике Windows";
+  openBtn.setAttribute("aria-label", "Показать в Проводнике Windows");
+  openBtn.addEventListener("click", (event) => {
+    event.stopPropagation();
+    event.preventDefault();
+    openFileByPathDeduped(getPath());
+  });
+  box.append(copyBtn, openBtn);
+  return box;
+}
+
 async function requestHighQualityPage(page) {
-  // A0 Model Space maps can exceed 100 million pixels at 300 DPI.  They are
-  // intentionally an orientation preview; exact inspection belongs to the
-  // native DWG application.  Do not make every card click wait a minute.
-  if (page.previewType === "DWG_MODEL") {
-    if (state.activePageKey === pageKey(page)) {
-      setQualityBadge(`Model Space · обзор ${page.dpi || PDF_PREVIEW_DPI} DPI`);
-    }
-    return;
-  }
   if (!page.documentPath || !page.page || page.dpi >= PDF_QUALITY_DPI) return;
   const key = pageKey(page);
   if (state.highQualityPages.has(key)) {
@@ -1828,6 +1645,7 @@ function showPdfPage(page) {
   if (page.previewType === "IMAGE") {
     clearExcelViewer();
     setActiveNativePath(page.path || page.sourcePath);
+    revealPathInTree(page.path || page.sourcePath);
     state.activePageUrl = page.url;
     els.pdfPageImage.src = page.url;
     els.pdfPageImage.hidden = false;
@@ -1838,7 +1656,7 @@ function showPdfPage(page) {
     els.viewPanMode.hidden = false;
     setQualityBadge("Изображение");
     updateActivePdfThumb();
-    if (els.pdfPageImage.complete && els.pdfPageImage.naturalWidth) fitPdfPage();
+    if (els.pdfPageImage.complete && els.pdfPageImage.naturalWidth) applyPageView();
     return;
   }
 
@@ -1846,13 +1664,13 @@ function showPdfPage(page) {
     clearExcelViewer();
     const sourcePath = page.sourcePath || page.documentPath || "";
     setActiveNativePath(sourcePath);
+    revealPathInTree(sourcePath);
     state.activePageUrl = "";
     els.pdfPageImage.hidden = true;
     els.pdfPageImage.removeAttribute("src");
     els.viewerEmpty.hidden = false;
 
     const ext = (page.sourceType || "").toUpperCase();
-    const appLabel = getNativeAppLabel(ext);
     let icon = "📄";
     if (ext === "GDOC") icon = "🌐";
     else if (ext === "GSHEET") icon = "📊";
@@ -1868,9 +1686,14 @@ function showPdfPage(page) {
         <div class="native-file-name">${escapeHtml(page.name)}</div>
         <div class="native-file-message">${escapeHtml(page.message || "")}</div>
         <div class="native-file-path" title="${escapeHtml(sourcePath)}">${escapeHtml(sourcePath)}</div>
-        <button class="primary-btn native-file-open-btn" id="nativeCardOpenBtn" type="button">
-          ↗ Открыть в ${escapeHtml(appLabel)}
-        </button>
+        <div class="native-file-actions">
+          <button class="secondary-btn native-file-copy-btn" id="nativeCardCopyBtn" type="button" title="Скопировать путь">
+            ⧉ Скопировать путь
+          </button>
+          <button class="primary-btn native-file-open-btn" id="nativeCardOpenBtn" type="button" title="Показать файл в Проводнике Windows">
+            ↗ Открыть в Проводнике
+          </button>
+        </div>
       </div>
     `;
 
@@ -1878,6 +1701,12 @@ function showPdfPage(page) {
     if (openBtn) {
       openBtn.addEventListener("click", () => {
         openActiveNativeFile().catch(showOperationError);
+      });
+    }
+    const copyBtn = els.viewerEmpty.querySelector("#nativeCardCopyBtn");
+    if (copyBtn) {
+      copyBtn.addEventListener("click", () => {
+        copyPathToClipboard(sourcePath);
       });
     }
 
@@ -1892,6 +1721,7 @@ function showPdfPage(page) {
   const highPage = state.highQualityPages.get(key);
   const displayPage = highPage || page;
   setActiveNativePath(page.previewFor?.path || page.sourcePath || page.documentPath || "");
+  revealPathInTree(page.previewFor?.path || page.sourcePath || page.documentPath || "");
   state.activePageUrl = displayPage.url;
   els.pdfPageImage.src = displayPage.url;
   els.pdfPageImage.hidden = false;
@@ -1907,12 +1737,34 @@ function showPdfPage(page) {
     displayPage.dpi >= PDF_QUALITY_DPI ? "ready" : "",
   );
   updateActivePdfThumb();
-  if (els.pdfPageImage.complete && els.pdfPageImage.naturalWidth) fitPdfPage();
+  if (els.pdfPageImage.complete && els.pdfPageImage.naturalWidth) applyPageView();
   requestHighQualityPage(page);
+}
+
+function clampPan() {
+  // Ровные границы перетаскивания: лист можно увести за любой край,
+  // но пара сантиметров (70px) всегда остаётся в видимой зоне,
+  // чтобы его можно было вернуть обратно.
+  const view = state.view;
+  if (els.pdfPageImage.hidden) return;
+  const naturalWidth = els.pdfPageImage.naturalWidth;
+  const naturalHeight = els.pdfPageImage.naturalHeight;
+  if (!naturalWidth || !naturalHeight) return;
+  const stage = els.pdfStage.getBoundingClientRect();
+  if (!stage.width || !stage.height) return;
+  const rotated = Math.abs(view.rotation % 180) === 90;
+  const width = (rotated ? naturalHeight : naturalWidth) * view.scale;
+  const height = (rotated ? naturalWidth : naturalHeight) * view.scale;
+  const margin = 70;
+  const maxX = Math.max(0, width / 2 + stage.width / 2 - margin);
+  const maxY = Math.max(0, height / 2 + stage.height / 2 - margin);
+  view.panX = Math.min(maxX, Math.max(-maxX, view.panX));
+  view.panY = Math.min(maxY, Math.max(-maxY, view.panY));
 }
 
 function updateViewTransform() {
   const view = state.view;
+  clampPan();
   els.pdfPageImage.style.transform = [
     "translate(-50%, -50%)",
     `translate(${view.panX}px, ${view.panY}px)`,
@@ -1935,6 +1787,9 @@ function fitPdfPage() {
   }
   if (!els.pdfPageImage.naturalWidth || !els.pdfPageImage.naturalHeight) return;
   const stage = els.pdfStage.getBoundingClientRect();
+  // Сцена ещё не разложена (нулевые размеры): не портим масштаб крошечным
+  // вписыванием, дождёмся следующего кадра или загрузки картинки.
+  if (stage.width < 10 || stage.height < 10) return;
   const rotated = Math.abs(state.view.rotation % 180) === 90;
   const imageWidth = rotated ? els.pdfPageImage.naturalHeight : els.pdfPageImage.naturalWidth;
   const imageHeight = rotated ? els.pdfPageImage.naturalWidth : els.pdfPageImage.naturalHeight;
@@ -1956,17 +1811,46 @@ function zoomPdf(factor) {
   }
   if (els.pdfPageImage.hidden) return;
   state.view.scale = Math.min(8, Math.max(0.05, state.view.scale * factor));
+  state.view.userZoomed = true;
   updateViewTransform();
+}
+
+function zoomThumbs(factor) {
+  // Зум ленты миниатюр: Ctrl+колесо над лентой меняет размер превью,
+  // прокрутка ленты без Ctrl работает как обычно. Верхний предел большой,
+  // чтобы во втором режиме страницу было видно почти в полный экран.
+  state.thumbScale = Math.min(4, Math.max(0.6, state.thumbScale * factor));
+  els.pdfThumbs.style.setProperty("--thumb-scale", String(state.thumbScale));
+}
+
+function applyPageView() {
+  // Вписать — только если пользователь сам не увеличивал: выбранный зум
+  // держится при переходе между страницами, сбрасывается кнопкой «Вписать».
+  if (state.view.userZoomed) {
+    state.view.panX = 0;
+    state.view.panY = 0;
+    updateViewTransform();
+    return;
+  }
+  fitPdfPage();
 }
 
 function setViewerMode(mode) {
   state.viewMode = mode;
+  state.view.userZoomed = false;
   els.shell.classList.toggle("medium-view", mode === "medium");
   els.shell.classList.toggle("full-view", mode === "full");
   els.viewStandardMode.classList.toggle("active", mode === "standard");
   els.viewMediumMode.classList.toggle("active", mode === "medium");
   els.viewFullMode.classList.toggle("active", mode === "full");
-  requestAnimationFrame(() => fitPdfPage());
+  // Панель с переключателями режимов видна всегда, иначе из второго
+  // режима некуда вернуться. Активный файл при переходах не трогаем:
+  // лента, дерево и большое окно показывают одно и то же.
+  if (mode === "medium") els.viewerControls.hidden = false;
+  if (state.revealedPath) revealPathInTree(state.revealedPath);
+  // Двойной кадр: первый — на перестроение сетки, второй — на вписывание
+  // в уже готовые размеры, иначе лист встаёт вполовину.
+  requestAnimationFrame(() => requestAnimationFrame(() => fitPdfPage()));
 }
 
 function chunkItems(items, size) {
@@ -1978,7 +1862,7 @@ function chunkItems(items, size) {
 }
 
 const PDF_RENDER_CONCURRENCY = 3;
-const PDF_FETCH_TIMEOUT_MS = 90000;
+const PDF_FETCH_TIMEOUT_MS = 300000;
 const DIFF_POLL_INTERVAL_MS = 15000;
 const PDF_PREVIEW_DPI = 150;
 const PDF_QUALITY_DPI = 300;
@@ -2072,7 +1956,9 @@ async function renderSelectedPdfFiles(previewItems = collectPreviewFilesForDispl
     try {
       controller = new AbortController();
       state.operationControllers.push(controller);
-      const timeoutId = setTimeout(() => controller.abort(), PDF_FETCH_TIMEOUT_MS);
+      const batchTimeout = batch[0]?.previewType === "DWG_MODEL" ? 600000 : PDF_FETCH_TIMEOUT_MS;
+
+      const timeoutId = setTimeout(() => controller.abort(), batchTimeout);
       const endpoint = batch[0]?.previewType === "WORD"
         ? "/api/word/render"
         : batch[0]?.previewType === "DWG_MODEL"
@@ -2167,71 +2053,11 @@ async function renderSelectedPdfFiles(previewItems = collectPreviewFilesForDispl
 }
 
 
-if (els.closeLoadModal) els.closeLoadModal.addEventListener("click", closeLoadModal);
-if (els.tabQuick) els.tabQuick.addEventListener("click", () => switchModalTab("quick"));
-if (els.tabBrowse) els.tabBrowse.addEventListener("click", () => switchModalTab("browse"));
-if (els.tabPath) els.tabPath.addEventListener("click", () => switchModalTab("path"));
-if (els.btnLoadBrowsedFolder) {
-  els.btnLoadBrowsedFolder.addEventListener("click", () => {
-    if (state.modal.currentBrowsePath) {
-      importObjectByPath(state.modal.currentBrowsePath).catch(showOperationError);
-    }
-  });
-}
-if (els.btnOpenInWindowsExplorer) {
-  els.btnOpenInWindowsExplorer.addEventListener("click", () => {
-    if (state.modal.currentBrowsePath) {
-      openInWindowsExplorer(state.modal.currentBrowsePath);
-    }
-  });
-}
-if (els.btnLoadManualPath) {
-  els.btnLoadManualPath.addEventListener("click", () => {
-    const val = els.manualPathInput?.value?.trim();
-    if (val) importObjectByPath(val).catch(showOperationError);
-  });
-}
-if (els.manualPathInput) {
-  els.manualPathInput.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") {
-      const val = els.manualPathInput.value.trim();
-      if (val) importObjectByPath(val).catch(showOperationError);
-    }
-  });
-}
-if (els.btnTriggerSystemPicker) {
-  els.btnTriggerSystemPicker.addEventListener("click", () => {
-    triggerSystemPicker().catch(console.error);
-  });
-}
-if (els.modalDropZone) {
-  els.modalDropZone.addEventListener("dragover", (e) => {
-    e.preventDefault();
-    els.modalDropZone.classList.add("dragover");
-  });
-  els.modalDropZone.addEventListener("dragleave", () => {
-    els.modalDropZone.classList.remove("dragover");
-  });
-  els.modalDropZone.addEventListener("drop", (e) => {
-    e.preventDefault();
-    els.modalDropZone.classList.remove("dragover");
-    if (e.dataTransfer.files && e.dataTransfer.files.length) {
-      // In Chromium webkitRelativePath or path might exist
-      const first = e.dataTransfer.files[0];
-      const p = first.path || "";
-      if (p) {
-        importObjectByPath(p).catch(showOperationError);
-      }
-    }
-  });
-}
-
 els.load.addEventListener("click", () => importObject(false).catch(showOperationError));
 els.refresh.addEventListener("click", () => {
   if (inTreeMode()) refreshObjectInPlace().catch(showOperationError);
   else importObject(true).catch(showOperationError);
 });
-els.diffFilterToggle.addEventListener("click", () => toggleDiffFilter());
 els.display.addEventListener("click", () => {
   if (inTreeMode()) renderSelectedFiles().catch(showOperationError);
   else openSelectedObject().catch(showOperationError);
@@ -2254,7 +2080,7 @@ els.backToTree.addEventListener("click", () => {
 els.treeSearch.addEventListener("input", () => {
   renderTree();
 });
-els.pdfPageImage.addEventListener("load", () => fitPdfPage());
+els.pdfPageImage.addEventListener("load", () => applyPageView());
 els.excelSheetFrame.addEventListener("load", () => {
   if (!state.excelWorkbook) return;
   els.excelSheetFrame.contentWindow?.postMessage({ type: "launcher-sheet-zoom", value: state.excelScale }, "*");
@@ -2272,7 +2098,13 @@ els.excelTabs.addEventListener("wheel", (event) => {
 }, { passive: false });
 els.viewZoomOut.addEventListener("click", () => zoomPdf(0.82));
 els.viewZoomIn.addEventListener("click", () => zoomPdf(1.22));
-els.viewFit.addEventListener("click", () => fitPdfPage());
+// «Вписать» возвращает всё в нормальное состояние: масштаб картинки,
+// сдвиг и поворот. Панель при этом никуда не уезжает.
+els.viewFit.addEventListener("click", () => {
+  state.view.rotation = 0;
+  state.view.userZoomed = false;
+  fitPdfPage();
+});
 els.viewRotate.addEventListener("click", () => {
   state.view.rotation = (state.view.rotation + 90) % 360;
   if (state.excelWorkbook) {
@@ -2289,6 +2121,11 @@ els.viewPanMode.addEventListener("click", () => {
 els.openNativeFile.addEventListener("click", () => {
   openActiveNativeFile().catch(showOperationError);
 });
+if (els.copyNativePath) {
+  els.copyNativePath.addEventListener("click", () => {
+    copyPathToClipboard(state.activeNativePath);
+  });
+}
 els.viewStandardMode.addEventListener("click", () => setViewerMode("standard"));
 els.viewMediumMode.addEventListener("click", () => setViewerMode("medium"));
 els.viewFullMode.addEventListener("click", () => setViewerMode("full"));
@@ -2297,7 +2134,17 @@ els.pdfStage.addEventListener("wheel", (event) => {
   if (event.target.closest(".viewer-controls")) return;
   if (!event.ctrlKey || (els.pdfPageImage.hidden && !state.excelWorkbook)) return;
   event.preventDefault();
+  event.stopPropagation();
   zoomPdf(event.deltaY < 0 ? 1.12 : 0.89);
+}, { passive: false });
+
+// Колесо над лентой без Ctrl — обычная прокрутка, с Ctrl — размер миниатюр.
+// Панель управления зумом не трогаем: трансформируется только контент.
+els.pdfThumbs.addEventListener("wheel", (event) => {
+  if (!event.ctrlKey || !event.deltaY) return;
+  event.preventDefault();
+  event.stopPropagation();
+  zoomThumbs(event.deltaY < 0 ? 1.15 : 0.87);
 }, { passive: false });
 
 els.pdfStage.addEventListener("pointerdown", (event) => {
@@ -2336,10 +2183,6 @@ els.pdfStage.addEventListener("pointercancel", endPdfDrag);
 
 document.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
-  if (els.loadModal && !els.loadModal.hidden) {
-    closeLoadModal();
-    return;
-  }
   if (!els.pdfPageImage.hidden && state.view.dragging) {
     state.view.dragging = false;
     updateViewTransform();

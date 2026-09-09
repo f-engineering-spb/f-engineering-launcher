@@ -21,6 +21,7 @@ $workbook = $null
 try {
   $excel = New-Object -ComObject Excel.Application
   $excel.Visible = $false
+  $excel.ScreenUpdating = $false
   $excel.DisplayAlerts = $false
   $excel.AskToUpdateLinks = $false
   Start-Sleep -Milliseconds 1500

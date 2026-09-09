@@ -37,6 +37,9 @@ temp/
 *.key
 *.token
 
+# Backups
+*.bak
+
 # OS
 .DS_Store
 Thumbs.db

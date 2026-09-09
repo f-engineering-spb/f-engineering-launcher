@@ -21,6 +21,7 @@ $document = $null
 try {
   $word = New-Object -ComObject Word.Application
   $word.Visible = $false
+  $word.ScreenUpdating = $false
   $word.DisplayAlerts = 0
 
   $document = $word.Documents.Open($inputItem.FullName, $false, $true)
