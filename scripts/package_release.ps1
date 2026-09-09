@@ -1,4 +1,4 @@
-$ErrorActionPreference = "Stop"
+﻿$ErrorActionPreference = "Stop"
 
 [Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
@@ -64,7 +64,7 @@ if (Test-Path -LiteralPath (Join-Path $repoRoot "tools")) {
 }
 
 # --- root meta files ---
-foreach ($name in @("README.md", "AGENTS.md", ".gitignore", ".editorconfig", "requirements.txt")) {
+foreach ($name in @("README.md", "AGENTS.md", ".gitignore", ".editorconfig", "requirements.txt", "SETUP.cmd")) {
   $src = Join-Path $repoRoot $name
   if (Test-Path -LiteralPath $src) {
     Copy-Item -LiteralPath $src -Destination $stageDir
@@ -106,10 +106,8 @@ $sizeMB = [math]::Round((Get-Item -LiteralPath $zipPath).Length / 1MB, 1)
 Write-Host "Done: $zipPath ($sizeMB MB)"
 
 Write-Host ""
-Write-Host "Install on the target computer:"
-Write-Host "  1. Unzip anywhere, e.g. C:\FEngineering_Launcher_v3"
-Write-Host "  2. Install Python 3.14 and run:  pip install -r requirements.txt"
-Write-Host "  3. Install Microsoft Excel and Word (needed for preview conversions)."
-Write-Host "  4. Mount Google Drive objects on the target machine, then run the Launcher"
-Write-Host "     and re-import objects with their new paths (object paths changed)."
-Write-Host "  5. Start:  .\scripts\start_windows.cmd   then open http://127.0.0.1:8780/"
+Write-Host "Установка на целевом компьютере:"
+Write-Host "  1. Распакуйте архив в C:\FEngineering_Launcher_v3 (или любую другую папку)."
+Write-Host "  2. Запустите SETUP.cmd — мастер проверит систему, установит библиотеки"
+Write-Host "     и создаст ярлык на Рабочем столе."
+Write-Host "  3. Запускайте лаунчер по клику на ярлык на Рабочем столе!"
