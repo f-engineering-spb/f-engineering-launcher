@@ -389,16 +389,21 @@ textarea {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 14px;
-  height: 14px;
+  width: 20px;
+  min-width: 20px;
+  height: 26px;
   flex-shrink: 0;
-  font-size: 11px;
+  font-size: 13px;
   font-weight: 700;
   color: #64748b;
   cursor: pointer;
   user-select: none;
-  transition: transform 0.12s ease;
-  line-height: 1;
+  transition: transform 0.12s ease, color 0.12s ease;
+  line-height: 26px;
+}
+
+.tree-chevron:hover {
+  color: #0284c7;
 }
 
 .tree-chevron.expanded {

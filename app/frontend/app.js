@@ -1148,15 +1148,25 @@ function renderTreeNode(node, parent) {
 
   row.addEventListener("click", (event) => {
     event.stopPropagation();
+    if (node.type === "folder") {
+      if (state.collapsedFolders.has(node.path)) {
+        state.collapsedFolders.delete(node.path);
+      } else {
+        state.collapsedFolders.add(node.path);
+      }
+      state.selectedPaths.clear();
+      state.selectedPaths.add(node.path);
+      const index = state.visibleRows.findIndex((item) => item.path === node.path);
+      if (index >= 0) state.lastSelectedIndex = index;
+      renderTree();
+      return;
+    }
     selectNode(node, event);
   });
 
   row.addEventListener("dblclick", (event) => {
     event.stopPropagation();
     if (node.type === "folder") {
-      if (state.collapsedFolders.has(node.path)) state.collapsedFolders.delete(node.path);
-      else state.collapsedFolders.add(node.path);
-      renderTree();
       return;
     }
     const index = state.visibleRows.findIndex((item) => item.path === node.path);
