@@ -798,11 +798,22 @@ function countDiffDescendants(node, result = { added: 0, changed: 0, removed: 0 
   return result;
 }
 
+const diffCountsCache = new Map();
+function countDiffDescendantsCached(node) {
+  if (diffCountsCache.has(node.path)) return diffCountsCache.get(node.path);
+  const counts = countDiffDescendants(node);
+  diffCountsCache.set(node.path, counts);
+  return counts;
+}
+
 function diffStatusText(status) {
   return status === "added" ? "новый" : status === "changed" ? "изменён" : "удалён";
 }
 
 function buildDiffState(manifest, previousManifest) {
+  diffCountsCache.clear();
+  pdfPairCache.clear();
+  state.pdfPairIndex = null;
   state.diffStatus.clear();
   state.diffRemovedNodes = [];
   state.diffSummary = null;
@@ -926,7 +937,33 @@ function selectNode(node, event) {
     setActiveNativePath("");
     state.revealedPath = "";
   }
-  renderTree();
+  updateTreeSelectionHighlight();
+}
+
+function updateTreeSelectionHighlight() {
+  if (!els.objectTree) return;
+  const rows = els.objectTree.querySelectorAll(".tree-row");
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i];
+    r.classList.toggle("selected", state.selectedPaths.has(r.dataset.path));
+  }
+}
+
+function rebuildVisibleRows() {
+  state.visibleRows = [];
+  function walk(node) {
+    if (!nodeMatches(node)) return;
+    state.visibleRows.push(node);
+    if (node.type === "folder" && !state.collapsedFolders.has(node.path) && node.children) {
+      node.children.forEach(walk);
+    }
+  }
+  if (state.currentManifest?.tree) {
+    walk(state.currentManifest.tree);
+  }
+  if (state.diffRemovedNodes?.length && !state.diffFilter) {
+    state.diffRemovedNodes.forEach((node) => state.visibleRows.push(node));
+  }
 }
 
 let toastTimer = null;
@@ -1025,6 +1062,58 @@ function getFileIconSvg(ext = "") {
   return `<svg viewBox="0 0 16 16" width="15" height="15" fill="#94a3b8"><path d="M3 1.5A1.5 1.5 0 0 1 4.5 0h5l4 4v10.5a1.5 1.5 0 0 1-1.5 1.5h-7.5A1.5 1.5 0 0 1 3 14.5v-13zm6.5.5v3h3l-3-3z"/></svg>`;
 }
 
+const pdfPairCache = new Map();
+function getPdfPairForDwgCached(node) {
+  if (!node || node.extension !== "DWG") return null;
+  if (pdfPairCache.has(node.path)) return pdfPairCache.get(node.path);
+  if (!state.pdfPairIndex && state.currentManifest?.tree) {
+    state.pdfPairIndex = buildPdfPairIndex(flattenTree(state.currentManifest.tree, []));
+  }
+  const pair = findPdfPairForDwg(node, state.pdfPairIndex);
+  pdfPairCache.set(node.path, pair);
+  return pair;
+}
+
+function toggleFolderNode(node, nodeEl) {
+  if (!node || node.type !== "folder" || !nodeEl) return;
+  const isCurrentlyCollapsed = state.collapsedFolders.has(node.path);
+  const willBeCollapsed = !isCurrentlyCollapsed;
+
+  if (willBeCollapsed) {
+    state.collapsedFolders.add(node.path);
+  } else {
+    state.collapsedFolders.delete(node.path);
+  }
+
+  const chevron = nodeEl.querySelector(":scope > .tree-row .tree-chevron");
+  if (chevron) {
+    chevron.classList.toggle("expanded", !willBeCollapsed);
+    chevron.title = willBeCollapsed ? "Развернуть папку" : "Свернуть папку";
+  }
+  nodeEl.classList.toggle("expanded", !willBeCollapsed);
+
+  let childrenEl = nodeEl.querySelector(":scope > .tree-children");
+  if (!willBeCollapsed) {
+    if (!childrenEl && node.children?.length) {
+      childrenEl = document.createElement("div");
+      childrenEl.className = "tree-children";
+      node.children.forEach((child) => renderTreeNode(child, childrenEl));
+      nodeEl.append(childrenEl);
+    } else if (childrenEl) {
+      childrenEl.classList.remove("collapsed");
+    }
+  } else {
+    if (childrenEl) {
+      childrenEl.classList.add("collapsed");
+    }
+  }
+
+  state.selectedPaths.clear();
+  state.selectedPaths.add(node.path);
+  updateTreeSelectionHighlight();
+  rebuildVisibleRows();
+}
+
 function renderTreeNode(node, parent) {
   if (!nodeMatches(node)) return;
 
@@ -1053,9 +1142,7 @@ function renderTreeNode(node, parent) {
     chevron.title = collapsed ? "Развернуть папку" : "Свернуть папку";
     chevron.addEventListener("click", (e) => {
       e.stopPropagation();
-      if (state.collapsedFolders.has(node.path)) state.collapsedFolders.delete(node.path);
-      else state.collapsedFolders.add(node.path);
-      renderTree();
+      toggleFolderNode(node, nodeEl);
     });
   } else {
     chevron.classList.add("leaf");
@@ -1084,7 +1171,7 @@ function renderTreeNode(node, parent) {
     nameEl.append(" ", diffBadge);
   }
   if (node.type === "folder" && state.diffSummary) {
-    const counts = countDiffDescendants(node);
+    const counts = countDiffDescendantsCached(node);
     const parts = [];
     if (counts.added) parts.push(`+${counts.added}`);
     if (counts.changed) parts.push(`~${counts.changed}`);
@@ -1097,7 +1184,7 @@ function renderTreeNode(node, parent) {
     }
   }
   if (node.type === "file" && node.extension === "DWG") {
-    const pdfPair = findPdfPairForDwg(node, state.pdfPairIndex);
+    const pdfPair = getPdfPairForDwgCached(node);
     if (pdfPair) {
       const pairBadge = document.createElement("span");
       pairBadge.className = "pair-badge";
@@ -1149,16 +1236,7 @@ function renderTreeNode(node, parent) {
   row.addEventListener("click", (event) => {
     event.stopPropagation();
     if (node.type === "folder") {
-      if (state.collapsedFolders.has(node.path)) {
-        state.collapsedFolders.delete(node.path);
-      } else {
-        state.collapsedFolders.add(node.path);
-      }
-      state.selectedPaths.clear();
-      state.selectedPaths.add(node.path);
-      const index = state.visibleRows.findIndex((item) => item.path === node.path);
-      if (index >= 0) state.lastSelectedIndex = index;
-      renderTree();
+      toggleFolderNode(node, nodeEl);
       return;
     }
     selectNode(node, event);
@@ -1173,7 +1251,7 @@ function renderTreeNode(node, parent) {
     state.selectedPaths.clear();
     state.selectedPaths.add(node.path);
     state.lastSelectedIndex = index;
-    renderTree();
+    updateTreeSelectionHighlight();
     openFileByPathDeduped(node.path);
   });
 
@@ -1239,7 +1317,9 @@ function renderTree() {
     els.objectTree.append(empty);
     return;
   }
-  state.pdfPairIndex = buildPdfPairIndex(flattenTree(state.currentManifest.tree, []));
+  if (!state.pdfPairIndex) {
+    state.pdfPairIndex = buildPdfPairIndex(flattenTree(state.currentManifest.tree, []));
+  }
   renderTreeNode(state.currentManifest.tree, els.objectTree);
   if (state.diffRemovedNodes.length && !state.diffFilter) {
     const removedTitle = document.createElement("div");
@@ -1322,6 +1402,9 @@ async function openSelectedObject() {
   state.diffFilter = false;
   state.collapsedFolders.clear();
   state.renderedPages = [];
+  pdfPairCache.clear();
+  diffCountsCache.clear();
+  state.pdfPairIndex = null;
   buildDiffState(manifest, null);
   setMode("tree");
   setTreeBrowseMode(true);
