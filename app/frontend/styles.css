@@ -194,37 +194,74 @@ textarea {
 .object-list {
   flex: 1;
   margin-bottom: 7px;
+  overflow-y: auto;
+  padding: 2px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
 }
 
 .object-row {
-  padding: 7px 8px;
-  border-bottom: 1px solid rgba(200, 204, 208, .7);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 26px;
+  min-height: 26px;
+  max-height: 26px;
+  padding: 0 6px;
+  border-radius: 4px;
+  border: 1px solid transparent;
   cursor: pointer;
+  user-select: none;
+  font-size: 11.75px;
+  line-height: 26px;
+  transition: background 0.1s ease, border-color 0.1s ease;
+  position: relative;
 }
 
-.object-row:hover,
-.object-row.selected {
+.object-row:hover {
   background: var(--active);
 }
 
-.object-row strong {
-  display: block;
-  overflow: visible;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 11px;
-  font-weight: 430;
-  letter-spacing: -.006em;
+.object-row.selected {
+  background: #e4eff7;
+  border-color: #b9d8ee;
+  color: #004d80;
+  font-weight: 500;
 }
 
-.object-row span {
-  display: block;
+.object-row .object-main {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
   overflow: hidden;
-  color: var(--muted);
-  font-size: 10px;
-  font-weight: 400;
+}
+
+.object-row .object-icon {
+  width: 15px;
+  height: 15px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.object-row .object-title {
+  overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-size: 11.5px;
+  font-weight: inherit;
+  letter-spacing: -0.01em;
+}
+
+.object-row .object-badge {
+  font-size: 10px;
+  color: var(--muted);
+  flex-shrink: 0;
+  margin-left: 2px;
 }
 
 .stats {
@@ -277,102 +314,137 @@ textarea {
   background: var(--active-strong);
 }
 
+/* =========================================================================
+   Дерево папок и файлов: стиль Windows 11 Explorer (26px плотность)
+   ========================================================================= */
+
 .tree {
   flex: 1;
-  padding: 5px 0;
+  padding: 4px 2px;
   font-size: 11.75px;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.tree-node {
+  position: relative;
+  display: flex;
+  flex-direction: column;
 }
 
 .tree-row {
   position: relative;
-  display: grid;
-  grid-template-columns: 18px minmax(0, 1fr) auto;
-  gap: 5px;
+  display: flex;
   align-items: center;
-  min-height: 24px;
-  padding: 2px 7px;
-  border: 1px solid transparent;
+  justify-content: space-between;
+  height: 26px;
+  min-height: 26px;
+  max-height: 26px;
+  padding: 0 4px;
   border-radius: 4px;
+  border: 1px solid transparent;
   white-space: nowrap;
   cursor: pointer;
+  user-select: none;
+  font-size: 11.75px;
+  line-height: 26px;
+  transition: background 0.1s ease, border-color 0.1s ease;
 }
 
-.tree-row:hover { background: var(--active); }
+.tree-row:hover {
+  background: var(--active);
+}
 
 .tree-row.selected {
-  border-color: rgba(31, 35, 40, .45);
-  background: var(--active-strong);
+  background: #e4eff7;
+  border-color: #b9d8ee;
+  color: #004d80;
+  font-weight: 500;
 }
 
-.tree-row.hidden { display: none; }
+.tree-row.hidden {
+  display: none;
+}
 
 .tree-row.folder {
-  min-height: 27px;
-  margin: 3px 3px 0;
-  padding: 3px 7px;
-  border-color: rgba(150, 171, 184, .48);
-  border-radius: 5px;
-  background: rgba(234, 241, 245, .74);
-  color: #263a47;
-  font-weight: 560;
-}
-
-.tree-row.folder:hover { background: rgba(220, 233, 240, .96); }
-
-.tree-row.folder.selected {
-  border-color: rgba(62, 105, 130, .66);
-  background: var(--active-strong);
+  color: #1e293b;
+  font-weight: 500;
 }
 
 .tree-row.file {
-  min-height: 22px;
-  color: #3e4a52;
+  color: #334155;
   font-weight: 400;
 }
 
-.tree-row.folder > :first-child {
-  color: #3f6c85;
-  font-size: 16px;
-  font-weight: 500;
-  line-height: 1;
-  text-align: center;
+.tree-row-content {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
 }
 
-.tree-row.file > :first-child {
-  color: #8497a3;
-  font-size: 14px;
+.tree-chevron {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 700;
+  color: #64748b;
+  cursor: pointer;
+  user-select: none;
+  transition: transform 0.12s ease;
   line-height: 1;
-  text-align: center;
+}
+
+.tree-chevron.expanded {
+  transform: rotate(90deg);
+}
+
+.tree-chevron.leaf {
+  visibility: hidden;
+}
+
+.tree-icon {
+  width: 15px;
+  height: 15px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.tree-icon svg {
+  width: 15px;
+  height: 15px;
+  display: block;
 }
 
 .tree-name {
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11.5px;
+  letter-spacing: -0.01em;
 }
 
 .tree-meta {
   color: var(--muted);
-  font-size: 10.75px;
-}
-
-.tree-row.folder .tree-meta {
-  min-width: 18px;
-  padding: 1px 5px;
-  border: 1px solid rgba(137, 162, 177, .48);
-  border-radius: 9px;
-  background: rgba(255, 255, 255, .62);
-  color: #5a7384;
   font-size: 10px;
-  line-height: 1.2;
-  text-align: center;
+  flex-shrink: 0;
+  margin-left: 2px;
 }
 
 .pair-badge {
   display: inline-block;
   margin-left: 3px;
   color: #4b6f8f;
-  font-size: 12px;
-  font-weight: 500;
+  font-size: 11px;
+  font-weight: 600;
   line-height: 1;
   vertical-align: baseline;
 }
@@ -381,34 +453,54 @@ textarea {
   display: none;
 }
 
-.copy-path-button {
-  position: absolute;
-  top: 50%;
-  right: 4px;
-  width: 22px;
-  height: 20px;
-  padding: 0;
-  border: 1px solid rgba(102, 127, 153, .45);
-  border-radius: 4px;
-  background: rgba(251, 252, 253, .76);
-  color: var(--muted);
-  font-size: 13px;
-  line-height: 1;
+/* Действия при наведении курсора (Hover Actions) */
+.hover-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
   opacity: 0;
-  cursor: pointer;
-  transform: translateY(-50%);
-  transition: opacity .12s ease, background .12s ease, border-color .12s ease;
+  pointer-events: none;
+  flex-shrink: 0;
+  margin-left: 6px;
+  transition: opacity 0.12s ease;
 }
 
-.tree-row:hover .copy-path-button,
-.tree-row:focus-within .copy-path-button {
+.object-row:hover .hover-actions,
+.object-row:focus-within .hover-actions,
+.tree-row:hover .hover-actions,
+.tree-row:focus-within .hover-actions {
   opacity: 1;
+  pointer-events: auto;
 }
 
-.copy-path-button:hover {
-  border-color: var(--line-strong);
-  background: var(--active);
-  color: var(--ink);
+.hover-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  min-height: 20px;
+  padding: 0;
+  border: 1px solid rgba(148, 163, 184, 0.45);
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.9);
+  color: #475569;
+  cursor: pointer;
+  line-height: 1;
+  box-shadow: none;
+  transition: background 0.1s ease, border-color 0.1s ease, color 0.1s ease;
+}
+
+.hover-btn:hover {
+  background: #ffffff;
+  border-color: #0284c7;
+  color: #0284c7;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+.hover-btn svg {
+  width: 12px;
+  height: 12px;
 }
 
 /* Короткая подсветка строки дерева для файла активной миниатюры */
@@ -418,57 +510,20 @@ textarea {
   outline-offset: -2px;
 }
 
+/* Дочерние элементы дерева: аккуратная тонкая вертикальная направляющая */
 .tree-children {
   position: relative;
-  margin-left: 15px;
-  padding-left: 12px;
+  margin-left: 11px;
+  padding-left: 9px;
+  border-left: 1px solid rgba(148, 163, 184, 0.35);
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
 }
 
-.tree-row > .tree-children {
-  grid-column: 1 / -1;
+.tree-children.collapsed {
+  display: none;
 }
-
-.tree-children > .tree-row::before {
-  position: absolute;
-  top: 50%;
-  left: -13px;
-  width: 11px;
-  border-top: 1px solid rgba(142, 166, 181, .58);
-  content: "";
-}
-
-/* Вертикаль рисуется по строкам, а не рамкой контейнера:
-   у последней вложенной строки линия заканчивается на ней
-   и не торчит вниз в никуда. */
-.tree-children > .tree-row::after {
-  position: absolute;
-  left: -13px;
-  top: 0;
-  border-left: 1px solid rgba(142, 166, 181, .58);
-  content: "";
-}
-
-.tree-children > .tree-row:not(:last-child)::after {
-  bottom: -6px;
-}
-
-.tree-children > .tree-row:last-child::after {
-  height: 50%;
-}
-
-.tree-children > .tree-row {
-  margin-top: 3px;
-}
-
-.tree-children > .tree-row.folder {
-  margin-top: 6px;
-}
-
-.tree-children > .tree-row.file + .tree-row.folder {
-  margin-top: 3px;
-}
-
-.tree-children.collapsed { display: none; }
 
 .shell.tree-browse .viewer {
   position: relative;
@@ -496,25 +551,40 @@ textarea {
 }
 
 .shell.tree-browse .tree-row {
-  grid-template-columns: 18px max-content auto;
-  width: max-content;
+  width: 100%;
   max-width: 100%;
-  padding-right: 32px;
-}
-
-.shell.tree-browse .tree-row.folder {
-  width: fit-content;
-  max-width: min(760px, 100%);
-  padding-right: 7px;
-}
-
-.shell.tree-browse .tree-row.folder .copy-path-button {
-  right: -26px;
 }
 
 .shell.tree-browse .tree-name {
   overflow: visible;
   text-overflow: clip;
+}
+
+/* Тост уведомление */
+.toast {
+  position: fixed;
+  bottom: 18px;
+  right: 18px;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 14px;
+  border-radius: 6px;
+  background: #1e293b;
+  color: #f8fafc;
+  font-size: 11.5px;
+  font-weight: 500;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.2);
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(8px);
+  transition: opacity 0.18s ease, transform 0.18s ease;
+}
+
+.toast.visible {
+  opacity: 1;
+  transform: translateY(0);
 }
 
 .empty-note {

@@ -169,11 +169,51 @@ function renderObjectList() {
     row.classList.toggle("selected", object.id === state.selectedObjectId);
     row.title = object.rootPath;
 
-    const title = document.createElement("strong");
+    const main = document.createElement("div");
+    main.className = "object-main";
+
+    const icon = document.createElement("span");
+    icon.className = "object-icon";
+    icon.innerHTML = `<svg viewBox="0 0 16 16" width="15" height="15" fill="#f59e0b"><path d="M1.5 3A1.5 1.5 0 0 0 0 4.5v7A1.5 1.5 0 0 0 1.5 13h13a1.5 1.5 0 0 0 1.5-1.5v-5A1.5 1.5 0 0 0 14.5 5H7.707L6.354 3.646A1.5 1.5 0 0 0 5.293 3.207L1.5 3z"/></svg>`;
+
+    const title = document.createElement("span");
+    title.className = "object-title";
     title.textContent = object.name;
-    const meta = document.createElement("span");
-    meta.textContent = `${object.statistics?.files || 0} файлов · ${object.rootPath}`;
-    row.append(title, meta);
+
+    const badge = document.createElement("span");
+    badge.className = "object-badge";
+    badge.textContent = `(${object.statistics?.files || 0})`;
+
+    main.append(icon, title, badge);
+
+    const actions = document.createElement("div");
+    actions.className = "hover-actions";
+
+    const copyBtn = document.createElement("button");
+    copyBtn.type = "button";
+    copyBtn.className = "hover-btn copy-path-button";
+    copyBtn.title = "Скопировать путь к папке объекта";
+    copyBtn.setAttribute("aria-label", copyBtn.title);
+    copyBtn.innerHTML = `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="5" y="5" width="8" height="8" rx="1.5"/><path d="M3 11V3.5A1.5 1.5 0 0 1 4.5 2H11"/></svg>`;
+    copyBtn.addEventListener("click", (event) => {
+      event.stopPropagation();
+      copyPathToClipboard(object.rootPath);
+    });
+
+    const openBtn = document.createElement("button");
+    openBtn.type = "button";
+    openBtn.className = "hover-btn open-native-row-button";
+    openBtn.title = "Показать папку объекта в Проводнике Windows";
+    openBtn.setAttribute("aria-label", openBtn.title);
+    openBtn.innerHTML = `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 4.5A1.5 1.5 0 0 1 3.5 3H6l1.5 1.5H12.5A1.5 1.5 0 0 1 14 6v6.5a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 12.5V4.5z"/><path d="M9.5 8.5L12 6m0 0h-2.5m2.5 0v2.5"/></svg>`;
+    openBtn.addEventListener("click", (event) => {
+      event.stopPropagation();
+      event.preventDefault();
+      openFileByPath(object.rootPath).catch(showOperationError);
+    });
+
+    actions.append(copyBtn, openBtn);
+    row.append(main, actions);
 
     row.addEventListener("click", (event) => {
       event.stopPropagation();
@@ -889,6 +929,29 @@ function selectNode(node, event) {
   renderTree();
 }
 
+let toastTimer = null;
+function showToast(message) {
+  let toast = document.getElementById("toast");
+  if (!toast) {
+    toast = document.createElement("div");
+    toast.id = "toast";
+    toast.className = "toast";
+    document.body.append(toast);
+  }
+  toast.innerHTML = `<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="#34d399" stroke-width="2"><path d="M3 8.5l3.5 3.5 6.5-7.5"/></svg><span>${escapeHtml(message)}</span>`;
+  toast.hidden = false;
+  requestAnimationFrame(() => {
+    toast.classList.add("visible");
+  });
+  if (toastTimer) clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => {
+    toast.classList.remove("visible");
+    setTimeout(() => {
+      if (!toast.classList.contains("visible")) toast.hidden = true;
+    }, 200);
+  }, 2200);
+}
+
 async function copyPathToClipboard(path) {
   if (!path) return;
   try {
@@ -904,6 +967,7 @@ async function copyPathToClipboard(path) {
     document.execCommand("copy");
     fallback.remove();
   }
+  showToast("Путь скопирован в буфер обмена");
 }
 
 function revealPathInTree(path) {
@@ -942,25 +1006,76 @@ function revealPathInTree(path) {
   }
 }
 
+const FOLDER_ICON_SVG = `<svg viewBox="0 0 16 16" width="15" height="15" fill="#f59e0b"><path d="M1.5 3A1.5 1.5 0 0 0 0 4.5v7A1.5 1.5 0 0 0 1.5 13h13a1.5 1.5 0 0 0 1.5-1.5v-5A1.5 1.5 0 0 0 14.5 5H7.707L6.354 3.646A1.5 1.5 0 0 0 5.293 3.207L1.5 3z"/></svg>`;
+
+function getFileIconSvg(ext = "") {
+  const e = String(ext).toUpperCase();
+  if (e === "PDF") {
+    return `<svg viewBox="0 0 16 16" width="15" height="15" fill="#dc2626"><path d="M3 1.5A1.5 1.5 0 0 1 4.5 0h5l4 4v10.5a1.5 1.5 0 0 1-1.5 1.5h-7.5A1.5 1.5 0 0 1 3 14.5v-13zm6.5.5v3h3l-3-3z"/><text x="3.8" y="12" font-size="5" font-weight="bold" fill="#ffffff" font-family="Segoe UI, sans-serif">PDF</text></svg>`;
+  }
+  if (e === "DWG" || e === "DXF") {
+    return `<svg viewBox="0 0 16 16" width="15" height="15" fill="#2563eb"><path d="M3 1.5A1.5 1.5 0 0 1 4.5 0h5l4 4v10.5a1.5 1.5 0 0 1-1.5 1.5h-7.5A1.5 1.5 0 0 1 3 14.5v-13zm6.5.5v3h3l-3-3z"/><text x="3" y="12" font-size="4.5" font-weight="bold" fill="#ffffff" font-family="Segoe UI, sans-serif">DWG</text></svg>`;
+  }
+  if (e === "XLSX" || e === "XLS" || e === "CSV") {
+    return `<svg viewBox="0 0 16 16" width="15" height="15" fill="#16a34a"><path d="M3 1.5A1.5 1.5 0 0 1 4.5 0h5l4 4v10.5a1.5 1.5 0 0 1-1.5 1.5h-7.5A1.5 1.5 0 0 1 3 14.5v-13zm6.5.5v3h3l-3-3z"/><text x="3.8" y="12" font-size="5" font-weight="bold" fill="#ffffff" font-family="Segoe UI, sans-serif">XLS</text></svg>`;
+  }
+  if (e === "DOCX" || e === "DOC") {
+    return `<svg viewBox="0 0 16 16" width="15" height="15" fill="#1d4ed8"><path d="M3 1.5A1.5 1.5 0 0 1 4.5 0h5l4 4v10.5a1.5 1.5 0 0 1-1.5 1.5h-7.5A1.5 1.5 0 0 1 3 14.5v-13zm6.5.5v3h3l-3-3z"/><text x="3.2" y="12" font-size="4.5" font-weight="bold" fill="#ffffff" font-family="Segoe UI, sans-serif">DOC</text></svg>`;
+  }
+  return `<svg viewBox="0 0 16 16" width="15" height="15" fill="#94a3b8"><path d="M3 1.5A1.5 1.5 0 0 1 4.5 0h5l4 4v10.5a1.5 1.5 0 0 1-1.5 1.5h-7.5A1.5 1.5 0 0 1 3 14.5v-13zm6.5.5v3h3l-3-3z"/></svg>`;
+}
+
 function renderTreeNode(node, parent) {
   if (!nodeMatches(node)) return;
+
+  const nodeEl = document.createElement("div");
+  nodeEl.className = "tree-node";
+  const collapsed = state.collapsedFolders.has(node.path);
+  if (node.type === "folder" && !collapsed) {
+    nodeEl.classList.add("expanded");
+  }
+
   const row = document.createElement("div");
   row.className = `tree-row ${node.type}`;
   row.dataset.path = node.path;
   if (node.path === state.revealedPath) row.classList.add("thumb-reveal");
   row.classList.toggle("selected", state.selectedPaths.has(node.path));
   row.title = node.path;
-  const collapsed = state.collapsedFolders.has(node.path);
-  const icon = node.type === "folder" ? (collapsed ? "›" : "⌄") : "•";
+
+  const content = document.createElement("div");
+  content.className = "tree-row-content";
+
+  const chevron = document.createElement("span");
+  chevron.className = "tree-chevron";
+  if (node.type === "folder") {
+    chevron.textContent = "›";
+    if (!collapsed) chevron.classList.add("expanded");
+    chevron.title = collapsed ? "Развернуть папку" : "Свернуть папку";
+    chevron.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (state.collapsedFolders.has(node.path)) state.collapsedFolders.delete(node.path);
+      else state.collapsedFolders.add(node.path);
+      renderTree();
+    });
+  } else {
+    chevron.classList.add("leaf");
+    chevron.innerHTML = "&nbsp;";
+  }
+  content.append(chevron);
 
   const iconEl = document.createElement("span");
-  iconEl.textContent = icon;
+  iconEl.className = "tree-icon";
+  if (node.type === "folder") {
+    iconEl.innerHTML = FOLDER_ICON_SVG;
+  } else {
+    iconEl.innerHTML = getFileIconSvg(node.extension);
+  }
+  content.append(iconEl);
+
   const nameEl = document.createElement("span");
   nameEl.className = "tree-name";
   nameEl.textContent = node.name;
-  const metaEl = document.createElement("span");
-  metaEl.className = "tree-meta";
-  metaEl.textContent = node.type === "file" ? "" : (node.children || []).length;
+
   const diffStatus = state.diffStatus.get(node.path);
   if (node.type === "file" && diffStatus) {
     const diffBadge = document.createElement("span");
@@ -991,39 +1106,51 @@ function renderTreeNode(node, parent) {
       nameEl.append(" ", pairBadge);
     }
   }
-  const copyButton = document.createElement("button");
-  copyButton.type = "button";
-  copyButton.className = "copy-path-button";
-  copyButton.textContent = "⧉";
-  copyButton.title = "Скопировать полный путь";
-  copyButton.setAttribute("aria-label", "Скопировать полный путь");
+  content.append(nameEl);
 
-  let openButton = null;
-  if (node.type === "file") {
-    openButton = document.createElement("button");
-    openButton.type = "button";
-    openButton.className = "open-native-row-button";
-    openButton.textContent = "↗";
-    openButton.title = "Показать файл в Проводнике Windows";
-    openButton.setAttribute("aria-label", openButton.title);
-    openButton.addEventListener("click", (event) => {
-      event.stopPropagation();
-      event.preventDefault();
-      openFileByPath(node.path).catch(showOperationError);
-    });
+  if (node.type === "folder" && node.children) {
+    const metaEl = document.createElement("span");
+    metaEl.className = "tree-meta";
+    metaEl.textContent = `(${node.children.length})`;
+    content.append(metaEl);
   }
 
-  row.append(iconEl, nameEl, metaEl, copyButton);
-  if (openButton) row.append(openButton);
+  // Hover actions: right aligned, available for BOTH folders AND files
+  const actions = document.createElement("div");
+  actions.className = "hover-actions";
+
+  const copyButton = document.createElement("button");
+  copyButton.type = "button";
+  copyButton.className = "hover-btn copy-path-button";
+  copyButton.title = node.type === "folder" ? "Скопировать путь к папке" : "Скопировать полный путь к файлу";
+  copyButton.setAttribute("aria-label", copyButton.title);
+  copyButton.innerHTML = `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="5" y="5" width="8" height="8" rx="1.5"/><path d="M3 11V3.5A1.5 1.5 0 0 1 4.5 2H11"/></svg>`;
+  copyButton.addEventListener("click", (event) => {
+    event.stopPropagation();
+    copyPathToClipboard(node.path);
+  });
+
+  const openButton = document.createElement("button");
+  openButton.type = "button";
+  openButton.className = "hover-btn open-native-row-button";
+  openButton.title = node.type === "folder" ? "Показать папку в Проводнике Windows" : "Показать файл в Проводнике Windows";
+  openButton.setAttribute("aria-label", openButton.title);
+  openButton.innerHTML = `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 4.5A1.5 1.5 0 0 1 3.5 3H6l1.5 1.5H12.5A1.5 1.5 0 0 1 14 6v6.5a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 12.5V4.5z"/><path d="M9.5 8.5L12 6m0 0h-2.5m2.5 0v2.5"/></svg>`;
+  openButton.addEventListener("click", (event) => {
+    event.stopPropagation();
+    event.preventDefault();
+    openFileByPath(node.path).catch(showOperationError);
+  });
+
+  actions.append(copyButton, openButton);
+
+  row.append(content, actions);
 
   row.addEventListener("click", (event) => {
     event.stopPropagation();
     selectNode(node, event);
   });
-  copyButton.addEventListener("click", (event) => {
-    event.stopPropagation();
-    copyPathToClipboard(node.path);
-  });
+
   row.addEventListener("dblclick", (event) => {
     event.stopPropagation();
     if (node.type === "folder") {
@@ -1039,15 +1166,18 @@ function renderTreeNode(node, parent) {
     renderTree();
     openFileByPathDeduped(node.path);
   });
-  parent.append(row);
+
+  nodeEl.append(row);
   state.visibleRows.push(node);
 
   if (node.type === "folder" && node.children?.length && !collapsed) {
     const children = document.createElement("div");
     children.className = "tree-children";
     node.children.forEach((child) => renderTreeNode(child, children));
-    row.append(children);
+    nodeEl.append(children);
   }
+
+  parent.append(nodeEl);
 }
 
 function renderFormats() {
@@ -1111,16 +1241,46 @@ function renderTree() {
       row.className = "tree-row file diff-removed-row";
       row.dataset.path = node.path;
       row.title = `${node.path}\nФайл удалён из исходной папки, но превью сохранено.`;
+
+      const content = document.createElement("div");
+      content.className = "tree-row-content";
+
+      const chevron = document.createElement("span");
+      chevron.className = "tree-chevron leaf";
+      chevron.innerHTML = "&nbsp;";
+      content.append(chevron);
+
       const iconEl = document.createElement("span");
-      iconEl.textContent = "•";
+      iconEl.className = "tree-icon";
+      iconEl.innerHTML = getFileIconSvg(node.extension);
+      content.append(iconEl);
+
       const nameEl = document.createElement("span");
       nameEl.className = "tree-name";
       nameEl.textContent = node.name;
+
       const badge = document.createElement("span");
       badge.className = "diff-badge diff-removed";
       badge.textContent = "удалён";
       nameEl.append(" ", badge);
-      row.append(iconEl, nameEl);
+      content.append(nameEl);
+
+      const actions = document.createElement("div");
+      actions.className = "hover-actions";
+
+      const copyButton = document.createElement("button");
+      copyButton.type = "button";
+      copyButton.className = "hover-btn copy-path-button";
+      copyButton.title = "Скопировать путь к удалённому файлу";
+      copyButton.setAttribute("aria-label", copyButton.title);
+      copyButton.innerHTML = `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="5" y="5" width="8" height="8" rx="1.5"/><path d="M3 11V3.5A1.5 1.5 0 0 1 4.5 2H11"/></svg>`;
+      copyButton.addEventListener("click", (event) => {
+        event.stopPropagation();
+        copyPathToClipboard(node.path);
+      });
+      actions.append(copyButton);
+
+      row.append(content, actions);
       row.addEventListener("click", (event) => {
         event.stopPropagation();
         selectNode(node, event);
