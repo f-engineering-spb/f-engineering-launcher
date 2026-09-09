@@ -1,27 +1,6 @@
 $ErrorActionPreference = "Stop"
 
-[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)
-[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
-$OutputEncoding = [System.Text.UTF8Encoding]::new($false)
-$env:PYTHONUTF8 = "1"
-$env:PYTHONIOENCODING = "utf-8"
+# Единая точка запуска: запускает лаунчер как оконное приложение Windows (без консоли)
+$appLauncher = Join-Path $PSScriptRoot "start_app.ps1"
+& $appLauncher @args
 
-$repoRoot = Split-Path -Parent $PSScriptRoot
-$backend = Join-Path $repoRoot "app\backend\server.py"
-$port = 8780
-
-if (-not (Test-Path -LiteralPath $backend)) {
-  Write-Host "Backend is not implemented yet: $backend"
-  exit 1
-}
-
-$python = "python"
-if (Test-Path -LiteralPath "C:\Python314\python.exe") {
-  $python = "C:\Python314\python.exe"
-}
-
-Write-Host "F-Engineering Launcher v3"
-Write-Host "UTF-8 console bootstrap enabled"
-Write-Host "Open: http://127.0.0.1:$port/"
-
-& $python $backend --port $port
