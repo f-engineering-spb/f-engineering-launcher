@@ -346,7 +346,7 @@ function getNativeAppLabel(ext = "") {
   const e = String(ext).toUpperCase().replace(/^\./, "");
   switch (e) {
     case "DWG":
-    case "DXF": return "ZWCAD";
+    case "DXF": return "AutoCAD";
     case "PDF": return "ONLYOFFICE / PDF";
     case "DOC":
     case "DOCX":

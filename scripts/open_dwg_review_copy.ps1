@@ -66,8 +66,12 @@ public static class LauncherWin32
 }
 "@
 
-function Activate-ZwcadWindow {
+function Activate-CadWindow {
   for ($attempt = 0; $attempt -lt 24; $attempt += 1) {
+    if (Get-Process -Name "acad" -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 }) {
+      [LauncherWin32]::ActivateMainWindow("acad")
+      return
+    }
     if (Get-Process -Name "ZWCAD" -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 }) {
       [LauncherWin32]::ActivateMainWindow("ZWCAD")
       return
@@ -80,10 +84,13 @@ if (-not (Test-Path -LiteralPath $InputPath -PathType Leaf)) {
   throw "DWG file was not found: $InputPath"
 }
 
-$running = Get-Process -Name "ZWCAD" -ErrorAction SilentlyContinue
+$running = Get-Process -Name "acad" -ErrorAction SilentlyContinue
+if (-not $running) {
+  $running = Get-Process -Name "ZWCAD" -ErrorAction SilentlyContinue
+}
 if (-not $running) {
   Start-Process -FilePath $InputPath
-  Activate-ZwcadWindow
+  Activate-CadWindow
   exit 0
 }
 
@@ -91,23 +98,29 @@ $app = $null
 try {
   # Attach to the already running ZWCAD session.  GetActiveObject throws when
   # ZWCAD is not registered, so the association launch is used as a fallback.
-  $app = [System.Runtime.InteropServices.Marshal]::GetActiveObject("ZWCAD.Application.2025")
+  $progIds = @("AutoCAD.Application.24", "AutoCAD.Application", "ZWCAD.Application.2025", "ZWCAD.Application")
+  foreach ($p in $progIds) {
+    try {
+      $app = [System.Runtime.InteropServices.Marshal]::GetActiveObject($p)
+      if ($app) { break }
+    } catch {}
+  }
 } catch {
   Start-Process -FilePath $InputPath
-  Activate-ZwcadWindow
+  Activate-CadWindow
   exit 0
 }
 
 if ($null -eq $app) {
   Start-Process -FilePath $InputPath
-  Activate-ZwcadWindow
+  Activate-CadWindow
   exit 0
 }
 
 $app.Visible = $true
 $document = $app.Documents.Open($InputPath, $true)
 if (-not $document) {
-  throw "ZWCAD did not open the DWG file."
+  throw "CAD-система не смогла открыть DWG файл."
 }
 try {
   # Fit the whole drawing into the viewport and center it, the same way the
@@ -118,4 +131,4 @@ try {
   # ZoomExtents is not present in every ZWCAD build; the document is already
   # open, so the lack of auto-fit is not fatal.
 }
-Activate-ZwcadWindow
+Activate-CadWindow

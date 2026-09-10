@@ -26,10 +26,10 @@ if (-not [string]::IsNullOrWhiteSpace($outputDir) -and -not (Test-Path -LiteralP
 
 # Подключение к CAD через COM-интерфейс
 $comProgIds = @(
+  "AutoCAD.Application.24",
+  "AutoCAD.Application",
   "ZWCAD.Application.2025",
-  "ZWCAD.Application",
-  "AutoCAD.Application.2025",
-  "AutoCAD.Application"
+  "ZWCAD.Application"
 )
 
 $app = $null
@@ -75,9 +75,11 @@ try {
       # Выбор виртуального PDF-плоттера
       $devices = @($layout.GetPlotDeviceNames())
       $preferredDevices = @(
+        "DWG To PDF.pc3",
+        "AutoCAD PDF (General Documentation).pc3",
+        "AutoCAD PDF (High Quality Print).pc3",
         "ZWCAD PDF(High Quality Print).pc5",
         "DWG to PDF.pc5",
-        "DWG To PDF.pc3",
         "ZWCAD PDF(General Documentation).pc5",
         "Microsoft Print to PDF"
       )
@@ -129,9 +131,11 @@ try {
     $layout = $document.ModelSpace.Layout
     $devices = @($layout.GetPlotDeviceNames())
     $preferredDevices = @(
-      "ZWCAD PDF(High Quality Print).pc5",
-      "DWG to PDF.pc5",
       "DWG To PDF.pc3",
+        "AutoCAD PDF (General Documentation).pc3",
+        "AutoCAD PDF (High Quality Print).pc3",
+        "ZWCAD PDF(High Quality Print).pc5",
+        "DWG to PDF.pc5",
       "ZWCAD PDF(General Documentation).pc5",
       "Microsoft Print to PDF"
     )

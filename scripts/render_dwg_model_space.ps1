@@ -18,7 +18,22 @@ $document = $null
 try {
   # Open read-only.  The original DWG and its source directory are never a
   # write target for the preview pipeline.
-  $app = New-Object -ComObject "ZWCAD.Application.2025"
+  $comProgIds = @(
+    "AutoCAD.Application.24",
+    "AutoCAD.Application",
+    "ZWCAD.Application.2025",
+    "ZWCAD.Application"
+  )
+  $app = $null
+  foreach ($progId in $comProgIds) {
+    try {
+      $app = New-Object -ComObject $progId -ErrorAction Stop
+      if ($app) { break }
+    } catch {}
+  }
+  if (-not $app) {
+    throw "CAD COM error: neither AutoCAD nor ZWCAD could be initialized."
+  }
   $app.Visible = $false
   $document = $app.Documents.Open($InputPath, $true)
   $document.SetVariable("BACKGROUNDPLOT", 0)
@@ -26,11 +41,26 @@ try {
   # Model Space overview: full A0 page, extents, scale-to-fit and no plotted
   # lineweights.  It is a fast visual map, not a replacement for CAD layouts.
   $layout = $document.ModelSpace.Layout
-  $layout.ConfigName = "ZWCAD PDF(High Quality Print).pc5"
+  $devices = @($layout.GetPlotDeviceNames())
+  $preferredDevices = @(
+    "DWG To PDF.pc3",
+    "AutoCAD PDF (General Documentation).pc3",
+    "AutoCAD PDF (High Quality Print).pc3",
+    "ZWCAD PDF(High Quality Print).pc5",
+    "DWG to PDF.pc5",
+    "Microsoft Print to PDF"
+  )
+  foreach ($dev in $preferredDevices) {
+    if ($devices -contains $dev) {
+      $layout.ConfigName = $dev
+      $layout.RefreshPlotDeviceInfo()
+      break
+    }
+  }
   $layout.RefreshPlotDeviceInfo()
   $a0Media = @($layout.GetCanonicalMediaNames() | Where-Object { $_ -match "A0" } | Select-Object -First 1)
   if ($a0Media.Count -ne 1) {
-    throw "The ZWCAD PDF plotter did not expose an A0 format."
+    throw "CAD PDF-плоттер не предоставил формат A0."
   }
   $layout.CanonicalMediaName = $a0Media[0]
   $layout.PlotType = 1 # acExtents
@@ -41,10 +71,10 @@ try {
   $layout.PlotWithPlotStyles = $true
 
   if (-not $document.Plot.PlotToFile($OutputPath)) {
-    throw "ZWCAD did not confirm Model Space PDF creation."
+    throw "CAD-система не подтвердила создание PDF для пространства модели."
   }
   if (-not (Test-Path -LiteralPath $OutputPath) -or (Get-Item -LiteralPath $OutputPath).Length -le 1024) {
-    throw "ZWCAD did not create a usable preview PDF."
+    throw "CAD-система не создала PDF-файл превью."
   }
 } finally {
   if ($document) { $document.Close($false) }

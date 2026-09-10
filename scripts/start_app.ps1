@@ -68,8 +68,16 @@ if (-not $targetPort) {
 
 # 3. Если сервер на targetPort ещё не поднят — запускаем его скрыто
 if (-not (Test-ServerHealthy -Port $targetPort)) {
-  $pythonw = "C:\Python314\pythonw.exe"
-  if (-not (Test-Path -LiteralPath $pythonw)) {
+  $portablePyw = Join-Path $repoRoot "runtime\python\pythonw.exe"
+  $portablePy = Join-Path $repoRoot "runtime\python\python.exe"
+  $pythonw = $null
+  if (Test-Path -LiteralPath $portablePyw) {
+    $pythonw = $portablePyw
+  } elseif (Test-Path -LiteralPath $portablePy) {
+    $pythonw = $portablePy
+  } elseif (Test-Path -LiteralPath "C:\Python314\pythonw.exe") {
+    $pythonw = "C:\Python314\pythonw.exe"
+  } else {
     $pywCmd = Get-Command "pythonw.exe" -ErrorAction SilentlyContinue
     if ($pywCmd) {
       $pythonw = $pywCmd.Source
@@ -116,4 +124,5 @@ if (Test-Path -LiteralPath $edge) {
   & $chrome --app=$url --user-data-dir="$profile" --no-first-run
 } else {
   Start-Process $url
-}
+}
+

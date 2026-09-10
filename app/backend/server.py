@@ -724,7 +724,7 @@ def dwg_to_model_pdf(path: Path) -> tuple[Path, bool]:
         **hidden_process_kwargs(),
     )
     if process.returncode != 0:
-        message = process.stderr.strip() or process.stdout.strip() or "ZWCAD не смог создать PDF для чертежа"
+        message = process.stderr.strip() or process.stdout.strip() or "CAD-система (AutoCAD/ZWCAD) не смогла создать PDF для чертежа"
         raise RuntimeError(message)
 
     final_pdf = None
@@ -746,7 +746,7 @@ def dwg_to_model_pdf(path: Path) -> tuple[Path, bool]:
                     pass
 
     if not final_pdf or not final_pdf.exists() or final_pdf.stat().st_size <= 1024:
-        raise RuntimeError("ZWCAD не создал PDF-файл для чертежа")
+        raise RuntimeError("CAD-система (AutoCAD/ZWCAD) не создала PDF-файл для чертежа")
 
     if final_pdf == fallback_pdf:
         manifest_path.write_text(

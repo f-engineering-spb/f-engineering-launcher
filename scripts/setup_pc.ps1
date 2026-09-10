@@ -33,6 +33,7 @@ Write-Host "[1/6] Проверка интерпретатора Python..." -NoNe
 
 $pythonExe = $null
 $candidates = @(
+    (Join-Path $repoRoot "runtime\python\python.exe"),
     "python.exe",
     "C:\Python314\python.exe",
     "C:\Python313\python.exe",
