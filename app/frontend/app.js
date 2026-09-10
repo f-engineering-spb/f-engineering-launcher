@@ -1142,12 +1142,16 @@ function revealPathInTree(path, options = {}) {
 
   updateTreeSelectionHighlight();
 
+  if (path) {
+    const fileName = path.split(/[\\/]/).pop();
+    if (fileName) updateViewerBanner(fileName);
+  }
   if (row && !options.skipScroll) {
     row.scrollIntoView({ block: "nearest", behavior: docChanged ? "smooth" : "auto" });
   }
 }
 
-const FOLDER_ICON_SVG = `<svg viewBox="0 0 16 16" width="15" height="15" fill="#f59e0b"><path d="M1.5 3A1.5 1.5 0 0 0 0 4.5v7A1.5 1.5 0 0 0 1.5 13h13a1.5 1.5 0 0 0 1.5-1.5v-5A1.5 1.5 0 0 0 14.5 5H7.707L6.354 3.646A1.5 1.5 0 0 0 5.293 3.207L1.5 3z"/></svg>`;
+const FOLDER_ICON_SVG = `<svg viewBox="0 0 16 16" width="15" height="15"><path fill="#d89e13" d="M1.5 2A1.5 1.5 0 0 0 0 3.5v9A1.5 1.5 0 0 0 1.5 14h13a1.5 1.5 0 0 0 1.5-1.5v-7A1.5 1.5 0 0 0 14.5 4H7.5L6.146 2.646A1.5 1.5 0 0 0 5.086 2.207L1.5 2z"/><path fill="#ffcb30" d="M1 5h14v7.5a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 1 12.5V5z"/><path fill="#ffe277" d="M1 5h14v1H1z"/></svg>`;
 
 function getFileIconSvg(ext = "") {
   const e = String(ext).toUpperCase();
@@ -1216,6 +1220,9 @@ function toggleFolderNode(node, nodeEl) {
   state.selectedPaths.add(node.path);
   updateTreeSelectionHighlight();
   rebuildVisibleRows();
+  if (state.currentManifest?.name) {
+    updateViewerBanner(state.currentManifest.name);
+  }
 }
 
 function treeFilteringActive() {
@@ -1279,7 +1286,9 @@ function renderTreeNode(node, parent) {
 
   const iconEl = document.createElement("span");
   iconEl.className = "tree-icon";
-  if (node.type === "folder") {
+  if (node === state.currentManifest?.tree) {
+    iconEl.innerHTML = `<svg viewBox="0 0 16 16" width="15" height="15"><path fill="#ffffff" stroke="#718096" stroke-width="0.9" d="M3 1.5A1.5 1.5 0 0 1 4.5 0h6l4 4v10.5a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 3 14.5v-13z"/><path fill="#3b82f6" d="M5 6h6v1.2H5zm0 3h6v1.2H5zm0 3h4v1.2H5z"/></svg>`;
+  } else if (node.type === "folder") {
     iconEl.innerHTML = FOLDER_ICON_SVG;
   } else {
     iconEl.innerHTML = getFileIconSvg(node.extension);
@@ -1432,6 +1441,11 @@ function renderFormats() {
     });
     els.formatStrip.append(button);
   });
+}
+
+function updateViewerBanner(title) {
+  const el = document.getElementById("viewerBannerTitle");
+  if (el) el.textContent = title || "Политика \"Локальный компьютер\"";
 }
 
 function renderTree() {
@@ -1798,7 +1812,7 @@ async function activateExcelWorkbook(index) {
   });
   els.excelViewer.hidden = false;
   els.viewerControls.hidden = false;
-  els.viewRotate.hidden = false;
+  els.viewRotate.hidden = (state.viewMode === "medium");
   els.viewPanMode.hidden = false;
   setActiveNativePath(workbook.path);
   revealPathInTree(workbook.path);
@@ -1814,7 +1828,7 @@ async function showExcelWorkbooks(workbooks) {
 
 function renderPdfViewer(pages) {
   clearExcelViewer();
-  els.viewRotate.hidden = false;
+  els.viewRotate.hidden = (state.viewMode === "medium");
   els.viewPanMode.hidden = false;
   state.renderedPages = pages;
   els.pdfThumbs.replaceChildren();
@@ -1904,10 +1918,11 @@ function updateActivePdfThumb() {
 }
 
 function setQualityBadge(textValue, mode = "") {
-  els.qualityBadge.hidden = !textValue;
-  els.qualityBadge.textContent = textValue || "";
-  els.qualityBadge.classList.toggle("loading", mode === "loading");
-  els.qualityBadge.classList.toggle("ready", mode === "ready");
+  if (els.qualityBadge) {
+    els.qualityBadge.hidden = true;
+    els.qualityBadge.textContent = "";
+    els.qualityBadge.style.display = "none";
+  }
 }
 
 function setActiveNativePath(path) {
@@ -1972,12 +1987,12 @@ async function requestHighQualityPage(page) {
     if (state.activePageKey === key) {
       state.activePageUrl = cached.url;
       els.pdfPageImage.src = cached.url;
-      setQualityBadge(`Качество ${PDF_QUALITY_DPI} DPI`, "ready");
+      setQualityBadge("");
     }
     return;
   }
   if (state.activePageKey === key) {
-    setQualityBadge(`Качество ${PDF_QUALITY_DPI} DPI загружается…`, "loading");
+    setQualityBadge("");
   }
   try {
     const endpoint = page.previewType === "WORD"
@@ -2008,12 +2023,12 @@ async function requestHighQualityPage(page) {
     if (state.activePageKey === key) {
       state.activePageUrl = highPage.url;
       els.pdfPageImage.src = highPage.url;
-      setQualityBadge(`Качество ${PDF_QUALITY_DPI} DPI`, "ready");
+      setQualityBadge("");
     }
   } catch (error) {
     console.warn("High quality PDF page render failed", { page, error });
     if (state.activePageKey === key) {
-      setQualityBadge(`Обзор ${page.dpi || PDF_PREVIEW_DPI} DPI · качество недоступно`, "");
+      setQualityBadge("");
     }
   }
 }
@@ -2034,7 +2049,7 @@ function showPdfPage(page, options = {}) {
     els.viewerEmpty.hidden = true;
     els.pdfViewer.classList.remove("empty");
     els.viewerControls.hidden = false;
-    els.viewRotate.hidden = false;
+    els.viewRotate.hidden = (state.viewMode === "medium");
     els.viewPanMode.hidden = false;
     setQualityBadge("Изображение");
     updateActivePdfThumb();
@@ -2111,14 +2126,9 @@ function showPdfPage(page, options = {}) {
   els.viewerEmpty.hidden = true;
   els.pdfViewer.classList.remove("empty");
   els.viewerControls.hidden = false;
-  els.viewRotate.hidden = false;
+  els.viewRotate.hidden = (state.viewMode === "medium");
   els.viewPanMode.hidden = false;
-  setQualityBadge(
-    displayPage.dpi >= PDF_QUALITY_DPI
-      ? `Качество ${displayPage.dpi} DPI`
-      : `Обзор ${displayPage.dpi || PDF_PREVIEW_DPI} DPI`,
-    displayPage.dpi >= PDF_QUALITY_DPI ? "ready" : "",
-  );
+  setQualityBadge("");
   updateActivePdfThumb();
   if (els.pdfPageImage.complete && els.pdfPageImage.naturalWidth) applyPageView();
   requestHighQualityPage(page);
@@ -2187,6 +2197,10 @@ function fitPdfPage() {
 }
 
 function zoomPdf(factor) {
+  if (state.viewMode === "medium") {
+    zoomThumbs(factor);
+    return;
+  }
   if (state.excelWorkbook) {
     state.excelScale = Math.min(3, Math.max(0.35, state.excelScale * factor));
     els.excelSheetFrame.contentWindow?.postMessage({ type: "launcher-sheet-zoom", value: state.excelScale }, "*");
@@ -2199,10 +2213,9 @@ function zoomPdf(factor) {
 }
 
 function zoomThumbs(factor) {
-  // Зум ленты миниатюр: Ctrl+колесо над лентой меняет размер превью,
-  // прокрутка ленты без Ctrl работает как обычно. Верхний предел большой,
-  // чтобы во втором режиме страницу было видно почти в полный экран.
-  state.thumbScale = Math.min(4, Math.max(0.6, state.thumbScale * factor));
+  // Зум ленты миниатюр: кнопки +/- на нижней панели во 2-м режиме или Ctrl+колесо.
+  // Диапазон от 0.4 до 5.0 для масштабирования от мелкой сетки до почти полного экрана.
+  state.thumbScale = Math.min(5, Math.max(0.4, Number((state.thumbScale * factor).toFixed(2))));
   els.pdfThumbs.style.setProperty("--thumb-scale", String(state.thumbScale));
 }
 
@@ -2226,6 +2239,10 @@ function setViewerMode(mode) {
   els.viewStandardMode.classList.toggle("active", mode === "standard");
   els.viewMediumMode.classList.toggle("active", mode === "medium");
   els.viewFullMode.classList.toggle("active", mode === "full");
+  els.viewRotate.hidden = (mode === "medium");
+  if (mode !== "medium") {
+    fitPdfPage();
+  }
   // Панель с переключателями режимов видна всегда, иначе из второго
   // режима некуда вернуться. Активный файл при переходах не трогаем:
   // лента, дерево и большое окно показывают одно и то же.
@@ -2322,7 +2339,7 @@ async function renderSelectedPdfFiles(previewItems = collectPreviewFilesForDispl
   let nextBatchIndex = 0;
   let completedBatches = batches.length - renderableBatchCount;
 
-  startProgress("Рендер превью", `${previewItems.length} элементов · быстрый обзор ${PDF_PREVIEW_DPI} DPI · качество ${PDF_QUALITY_DPI} DPI по клику`);
+  startProgress("Подготовка превью", `${previewItems.length} элементов · подготовка страниц`);
 
   function refreshRenderProgress() {
     const percent = Math.min(99, Math.round((completedBatches / batches.length) * 100));
@@ -2428,7 +2445,7 @@ async function renderSelectedPdfFiles(previewItems = collectPreviewFilesForDispl
   const errorCount = allErrors.length;
   const detail = errorCount
     ? `Показано: ${renderedPages} из ${totalPages} стр. · ошибок: ${errorCount}`
-    : `Готово: ${totalPages} стр. · ${previewItems.length} элементов · обзор ${PDF_PREVIEW_DPI} DPI`;
+    : `Готово: ${totalPages} стр. · ${previewItems.length} элементов`;
   finishProgress(detail);
   if (errorCount) {
     console.warn("PDF render partial errors", allErrors);
@@ -2484,17 +2501,34 @@ els.viewZoomIn.addEventListener("click", () => zoomPdf(1.22));
 // «Вписать» возвращает всё в нормальное состояние: масштаб картинки,
 // сдвиг и поворот. Панель при этом никуда не уезжает.
 els.viewFit.addEventListener("click", () => {
+  if (state.excelWorkbook) {
+    state.view.rotation = 0;
+    els.excelSheetFrame.contentWindow?.postMessage({ type: "launcher-sheet-rotate", value: 0 }, "*");
+    els.excelSheetFrame.contentWindow?.postMessage({ type: "launcher-sheet-fit" }, "*");
+    return;
+  }
+  if (state.viewMode === "medium") {
+    state.thumbScale = 1;
+    els.pdfThumbs.style.setProperty("--thumb-scale", "1");
+    return;
+  }
   state.view.rotation = 0;
   state.view.userZoomed = false;
   fitPdfPage();
 });
 els.viewRotate.addEventListener("click", () => {
-  state.view.rotation = (state.view.rotation + 90) % 360;
+  // Во 2-м режиме поворот полностью заблокирован: поворот работает только для большого окна в 1-м и 3-м режимах
+  if (state.viewMode === "medium") return;
+
   if (state.excelWorkbook) {
+    state.view.rotation = (state.view.rotation + 90) % 360;
     els.excelSheetFrame.contentWindow?.postMessage({ type: "launcher-sheet-rotate", value: state.view.rotation }, "*");
     els.excelSheetFrame.contentWindow?.postMessage({ type: "launcher-sheet-fit" }, "*");
     return;
   }
+
+  // В 1-м и 3-м режимах вращается ТОЛЬКО главное окно большого просмотра (миниатюры не вращаются вообще)
+  state.view.rotation = (state.view.rotation + 90) % 360;
   fitPdfPage();
 });
 els.viewPanMode.addEventListener("click", () => {
