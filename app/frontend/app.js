@@ -402,7 +402,7 @@ function fileExtensionFromPath(path = "") {
 
 async function openFileByPath(path) {
   if (!path) return;
-  console.log("[Launcher] Reveal in Windows Explorer:", path);
+  console.log("[Launcher] Open in Windows Explorer:", path);
   startProgress("Открытие в Проводнике Windows", path);
   try {
     const response = await fetch("/api/open-file", {
@@ -411,11 +411,11 @@ async function openFileByPath(path) {
       body: JSON.stringify({ path }),
     });
     const payload = await response.json();
-    if (!response.ok) throw new Error(payload.error || "Файл не открыт");
-    finishProgress("Файл показан в Проводнике Windows");
+    if (!response.ok) throw new Error(payload.error || "Не удалось открыть Проводник");
+    finishProgress("Папка открыта в Проводнике Windows");
     if (payload.longPathWarning) showNotice(payload.longPathWarning);
   } catch (error) {
-    console.error("[Launcher] Failed to reveal file in Explorer:", error);
+    console.error("[Launcher] Failed to open in Explorer:", error);
     showOperationError(error);
   }
 }
@@ -904,7 +904,7 @@ function hasDiffChanges(manifest) {
   return Boolean(diff && ((diff.added || []).length || (diff.changed || []).length || (diff.removed || []).length));
 }
 
-function selectNode(node, event) {
+function selectNode(node, event = {}) {
   const index = state.visibleRows.findIndex((item) => item.path === node.path);
   if (event.shiftKey && state.lastSelectedIndex !== null) {
     const start = Math.min(state.lastSelectedIndex, index);
@@ -916,19 +916,17 @@ function selectNode(node, event) {
     else state.selectedPaths.add(node.path);
     state.lastSelectedIndex = index;
   } else {
-    if (state.selectedPaths.size === 1 && state.selectedPaths.has(node.path)) state.selectedPaths.clear();
-    else {
-      state.selectedPaths.clear();
-      state.selectedPaths.add(node.path);
-      state.lastSelectedIndex = index;
-    }
+    state.selectedPaths.clear();
+    state.selectedPaths.add(node.path);
+    state.lastSelectedIndex = index;
   }
   if (state.selectedPaths.size === 1) {
     const selectedPath = Array.from(state.selectedPaths)[0];
-    const selectedItem = state.visibleRows.find((item) => item.path === selectedPath);
+    const selectedItem = state.visibleRows.find((item) => item.path === selectedPath) || node;
     if (selectedItem && selectedItem.type === "file") {
       setActiveNativePath(selectedItem.path);
       state.revealedPath = selectedItem.path;
+      syncSelectionToPreview(selectedItem);
     } else {
       setActiveNativePath("");
       state.revealedPath = "";
@@ -940,12 +938,59 @@ function selectNode(node, event) {
   updateTreeSelectionHighlight();
 }
 
+function syncSelectionToPreview(fileNode) {
+  if (!fileNode || fileNode.type !== "file") return;
+  const path = fileNode.path;
+  const norm = path.replace(/\//g, "\\").toLowerCase();
+
+  // 1. Проверяем уже отрендеренные страницы PDF / Word / DWG / изображений
+  if (state.renderedPages?.length) {
+    const matchedPage = state.renderedPages.find((p) => {
+      const pPath = (p.previewFor?.path || p.sourcePath || p.documentPath || p.path || "").replace(/\//g, "\\").toLowerCase();
+      return pPath === norm;
+    });
+
+    if (matchedPage) {
+      showPdfPage(matchedPage, { skipTreeScroll: true });
+      const key = pageKey(matchedPage);
+      const thumbEl = els.pdfThumbs.querySelector(`.pdf-thumb[data-page-key="${CSS.escape(key)}"]`);
+      if (thumbEl) {
+        thumbEl.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "center" });
+      }
+      return;
+    }
+  }
+
+  // 2. Проверяем открытые книги Excel
+  if (state.excelWorkbooks?.length) {
+    const wbIndex = state.excelWorkbooks.findIndex((wb) => {
+      const wbPath = (wb.path || wb.sourcePath || "").replace(/\//g, "\\").toLowerCase();
+      return wbPath === norm;
+    });
+    if (wbIndex >= 0) {
+      activateExcelWorkbook(wbIndex);
+      const wbThumb = els.excelThumbs.querySelector(`.excel-thumb[data-workbook-index="${wbIndex}"]`);
+      if (wbThumb) {
+        wbThumb.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "center" });
+      }
+      return;
+    }
+  }
+
+  // 3. Если файл ещё не отрендерен в ленте — запускаем быстрый рендер для выбранного файла
+  renderSelectedFiles().catch(console.warn);
+}
+
 function updateTreeSelectionHighlight() {
   if (!els.objectTree) return;
   const rows = els.objectTree.querySelectorAll(".tree-row");
   for (let i = 0; i < rows.length; i++) {
     const r = rows[i];
-    r.classList.toggle("selected", state.selectedPaths.has(r.dataset.path));
+    const p = r.dataset.path;
+    const isSelected = state.selectedPaths.has(p);
+    const isRevealed = p === state.revealedPath;
+    r.classList.toggle("selected", isSelected);
+    r.classList.toggle("thumb-reveal", isRevealed);
   }
 }
 
@@ -1053,7 +1098,7 @@ async function copyPathToClipboard(rawPath) {
   }
 }
 
-function revealPathInTree(path) {
+function revealPathInTree(path, options = {}) {
   // Файл активной миниатюры в дереве подсвечен постоянно, пока стоим на нём:
   // одна запись в дереве — один подсвеченный файл, сколько бы страниц
   // у него ни было в ленте. Выделение синхронизируем с просмотром,
@@ -1061,30 +1106,43 @@ function revealPathInTree(path) {
   if (!path || !state.currentManifest?.tree || !els.objectTree) return;
   const docChanged = state.revealedPath !== path;
   state.revealedPath = path;
-  let needsRender = docChanged;
-  if (state.selectedPaths.size !== 1 || !state.selectedPaths.has(path)) {
-    state.selectedPaths.clear();
-    state.selectedPaths.add(path);
-    needsRender = true;
-  }
+  state.selectedPaths.clear();
+  state.selectedPaths.add(path);
+
   const nodeIndex = state.visibleRows.findIndex((item) => item.path === path);
   if (nodeIndex >= 0) state.lastSelectedIndex = nodeIndex;
-  const norm = String(path).replace(/\//g, "\\").toLowerCase();
-  [...state.collapsedFolders].forEach((folderPath) => {
-    const folderNorm = String(folderPath).replace(/\//g, "\\").toLowerCase();
-    if (norm === folderNorm || norm.startsWith(folderNorm + "\\")) {
-      state.collapsedFolders.delete(folderPath);
-      needsRender = true;
-    }
-  });
-  if (needsRender) renderTree();
+
   let row = null;
   try {
     row = els.objectTree.querySelector(`.tree-row[data-path="${CSS.escape(path)}"]`);
   } catch {
     row = null;
   }
-  if (row) {
+
+  // Если строка ещё не в DOM (родительская папка свёрнута) — раскрываем только нужных родителей
+  if (!row) {
+    const norm = String(path).replace(/\//g, "\\").toLowerCase();
+    let uncollapsedAny = false;
+    for (const folderPath of [...state.collapsedFolders]) {
+      const folderNorm = String(folderPath).replace(/\//g, "\\").toLowerCase();
+      if (norm.startsWith(folderNorm + "\\")) {
+        state.collapsedFolders.delete(folderPath);
+        uncollapsedAny = true;
+      }
+    }
+    if (uncollapsedAny) {
+      renderTree();
+      try {
+        row = els.objectTree.querySelector(`.tree-row[data-path="${CSS.escape(path)}"]`);
+      } catch {
+        row = null;
+      }
+    }
+  }
+
+  updateTreeSelectionHighlight();
+
+  if (row && !options.skipScroll) {
     row.scrollIntoView({ block: "nearest", behavior: docChanged ? "smooth" : "auto" });
   }
 }
@@ -1937,14 +1995,16 @@ async function requestHighQualityPage(page) {
   }
 }
 
-function showPdfPage(page) {
+function showPdfPage(page, options = {}) {
   const key = pageKey(page);
   state.activePageKey = key;
+  const skipTreeScroll = Boolean(options?.skipTreeScroll);
 
   if (page.previewType === "IMAGE") {
     clearExcelViewer();
-    setActiveNativePath(page.path || page.sourcePath);
-    revealPathInTree(page.path || page.sourcePath);
+    const sourcePath = page.path || page.sourcePath;
+    setActiveNativePath(sourcePath);
+    revealPathInTree(sourcePath, { skipScroll: skipTreeScroll });
     state.activePageUrl = page.url;
     els.pdfPageImage.src = page.url;
     els.pdfPageImage.hidden = false;
@@ -1963,7 +2023,7 @@ function showPdfPage(page) {
     clearExcelViewer();
     const sourcePath = page.sourcePath || page.documentPath || "";
     setActiveNativePath(sourcePath);
-    revealPathInTree(sourcePath);
+    revealPathInTree(sourcePath, { skipScroll: skipTreeScroll });
     state.activePageUrl = "";
     els.pdfPageImage.hidden = true;
     els.pdfPageImage.removeAttribute("src");
@@ -2019,8 +2079,9 @@ function showPdfPage(page) {
   clearExcelViewer();
   const highPage = state.highQualityPages.get(key);
   const displayPage = highPage || page;
-  setActiveNativePath(page.previewFor?.path || page.sourcePath || page.documentPath || "");
-  revealPathInTree(page.previewFor?.path || page.sourcePath || page.documentPath || "");
+  const targetDocPath = page.previewFor?.path || page.sourcePath || page.documentPath || "";
+  setActiveNativePath(targetDocPath);
+  revealPathInTree(targetDocPath, { skipScroll: skipTreeScroll });
   state.activePageUrl = displayPage.url;
   els.pdfPageImage.src = displayPage.url;
   els.pdfPageImage.hidden = false;
@@ -2481,17 +2542,65 @@ els.pdfStage.addEventListener("pointerup", endPdfDrag);
 els.pdfStage.addEventListener("pointercancel", endPdfDrag);
 
 document.addEventListener("keydown", (event) => {
-  if (event.key !== "Escape") return;
-  if (!els.pdfPageImage.hidden && state.view.dragging) {
-    state.view.dragging = false;
-    updateViewTransform();
+  const activeTag = document.activeElement?.tagName;
+  const isInput = activeTag === "INPUT" || activeTag === "TEXTAREA";
+
+  if (event.key === "Escape") {
+    if (!els.pdfPageImage.hidden && state.view.dragging) {
+      state.view.dragging = false;
+      updateViewTransform();
+      return;
+    }
+    state.selectedPaths.clear();
+    if (inTreeMode()) renderTree();
+    else {
+      state.selectedObjectId = null;
+      renderObjectList();
+    }
     return;
   }
-  state.selectedPaths.clear();
-  if (inTreeMode()) renderTree();
-  else {
-    state.selectedObjectId = null;
-    renderObjectList();
+
+  if (isInput) return;
+
+  // Навигация клавишами Вверх / Вниз по дереву (Windows Explorer стиль)
+  if (inTreeMode() && (event.key === "ArrowUp" || event.key === "ArrowDown")) {
+    const files = state.visibleRows.filter((r) => r.type === "file");
+    if (!files.length) return;
+    event.preventDefault();
+    const currentPath = Array.from(state.selectedPaths)[0] || state.revealedPath;
+    let idx = files.findIndex((f) => f.path === currentPath);
+    if (event.key === "ArrowDown") {
+      idx = idx >= 0 && idx < files.length - 1 ? idx + 1 : 0;
+    } else {
+      idx = idx > 0 ? idx - 1 : files.length - 1;
+    }
+    const nextFile = files[idx];
+    if (nextFile) {
+      selectNode(nextFile);
+      const row = els.objectTree?.querySelector(`.tree-row[data-path="${CSS.escape(nextFile.path)}"]`);
+      if (row) row.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    }
+    return;
+  }
+
+  // Навигация клавишами Влево / Вправо по страницам / миниатюрам
+  if (state.renderedPages?.length && (event.key === "ArrowLeft" || event.key === "ArrowRight")) {
+    event.preventDefault();
+    const pages = state.renderedPages;
+    let currentIdx = pages.findIndex((p) => pageKey(p) === state.activePageKey);
+    if (event.key === "ArrowRight") {
+      currentIdx = currentIdx >= 0 && currentIdx < pages.length - 1 ? currentIdx + 1 : 0;
+    } else {
+      currentIdx = currentIdx > 0 ? currentIdx - 1 : pages.length - 1;
+    }
+    const nextPage = pages[currentIdx];
+    if (nextPage) {
+      showPdfPage(nextPage);
+      const key = pageKey(nextPage);
+      const thumbEl = els.pdfThumbs?.querySelector(`.pdf-thumb[data-page-key="${CSS.escape(key)}"]`);
+      if (thumbEl) thumbEl.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "center" });
+    }
+    return;
   }
 });
 

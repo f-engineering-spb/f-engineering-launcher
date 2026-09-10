@@ -842,15 +842,17 @@ def set_windows_clipboard(text: str) -> bool:
 
 
 def launch_native_file(path: Path) -> str:
-    """Показать файл или папку в Проводнике Windows без привязки к путям EXE."""
+    """Показать файл или папку в Проводнике Windows без зависаний и создания зомби-процессов."""
     if not path.exists():
         raise FileNotFoundError(f"Файл не найден: {path}")
 
     if os.name != "nt":
-        subprocess.Popen(["xdg-open", str(path)])
+        target = path if path.is_dir() else path.parent
+        subprocess.Popen(["xdg-open", str(target)])
         return "xdg-open"
 
     resolved = os.path.normpath(str(path.resolve()))
+    target_dir = resolved if path.is_dir() else os.path.dirname(resolved)
 
     try:
         import ctypes
@@ -859,30 +861,15 @@ def launch_native_file(path: Path) -> str:
     except Exception:
         pass
 
-    # 1. Если это ПАПКА — открываем саму папку в Проводнике Windows
-    if path.is_dir():
-        try:
-            os.startfile(resolved)
-            return "explorer-open-folder-startfile"
-        except Exception:
-            subprocess.Popen(f'explorer.exe "{resolved}"')
-            return "explorer-open-folder-cmd"
-
-    # 2. Если это ФАЙЛ — открываем Проводник с ВЫДЕЛЕНИЕМ этого файла
-    # ВАЖНО: explorer.exe /select,"<path>" передаётся единой строкой,
-    # чтобы subprocess не вставлял пробел между запятой и путем!
+    # Открываем директорию через нативный ShellExecute (os.startfile).
+    # Это мгновенно открывает окно Проводника Windows, не создаёт фоновых процессов
+    # explorer.exe и надёжно работает как на локальных дисках, так и на Google Диске (H:\).
     try:
-        cmd = f'explorer.exe /select,"{resolved}"'
-        subprocess.Popen(cmd)
-        return "explorer-select"
+        os.startfile(target_dir)
+        return "explorer-open-folder"
     except Exception:
-        parent_dir = os.path.dirname(resolved)
-        try:
-            os.startfile(parent_dir)
-            return "explorer-parent-startfile"
-        except Exception:
-            subprocess.Popen(f'explorer.exe "{parent_dir}"')
-            return "explorer-parent-cmd"
+        subprocess.Popen(["cmd.exe", "/c", "start", "", target_dir], shell=True)
+        return "explorer-open-cmd"
 
     suffix = path.suffix.casefold()
 
