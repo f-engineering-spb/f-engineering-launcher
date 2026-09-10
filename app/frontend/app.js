@@ -989,22 +989,68 @@ function showToast(message) {
   }, 2200);
 }
 
-async function copyPathToClipboard(path) {
-  if (!path) return;
+async function copyPathToClipboard(rawPath) {
+  if (!rawPath) return;
+  // Убеждаемся, что системный путь Windows использует обратные слэши
+  const path = String(rawPath).replace(/\//g, "\\");
+  let success = false;
+
+  // 1. Попытка через нативный Win32 API бэкенда (работает везде без ограничений webview)
   try {
-    await navigator.clipboard.writeText(path);
-  } catch {
-    const fallback = document.createElement("textarea");
-    fallback.value = path;
-    fallback.setAttribute("readonly", "");
-    fallback.style.position = "fixed";
-    fallback.style.left = "-9999px";
-    document.body.append(fallback);
-    fallback.select();
-    document.execCommand("copy");
-    fallback.remove();
+    const resp = await fetch("/api/clipboard", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: path }),
+    });
+    if (resp.ok) {
+      const data = await resp.json();
+      if (data.ok) success = true;
+    }
+  } catch (err) {
+    console.warn("[Launcher] /api/clipboard error, trying browser fallback:", err);
   }
-  showToast("Путь скопирован в буфер обмена");
+
+  // 2. Если бэкенд недоступен — пробуем современный navigator.clipboard
+  if (!success && navigator.clipboard && window.isSecureContext) {
+    try {
+      await navigator.clipboard.writeText(path);
+      success = true;
+    } catch (e) {
+      console.warn("[Launcher] navigator.clipboard.writeText failed:", e);
+    }
+  }
+
+  // 3. Резервный браузерный фоллбэк через textarea без readonly и с явным фокусом
+  if (!success) {
+    try {
+      const textarea = document.createElement("textarea");
+      textarea.value = path;
+      textarea.style.position = "fixed";
+      textarea.style.top = "0";
+      textarea.style.left = "0";
+      textarea.style.width = "2em";
+      textarea.style.height = "2em";
+      textarea.style.padding = "0";
+      textarea.style.border = "none";
+      textarea.style.outline = "none";
+      textarea.style.boxShadow = "none";
+      textarea.style.background = "transparent";
+      document.body.appendChild(textarea);
+      textarea.focus();
+      textarea.select();
+      textarea.setSelectionRange(0, path.length);
+      success = document.execCommand("copy");
+      document.body.removeChild(textarea);
+    } catch (e) {
+      console.warn("[Launcher] execCommand copy failed:", e);
+    }
+  }
+
+  if (success) {
+    showToast("Путь скопирован в буфер обмена");
+  } else {
+    showToast("Не удалось скопировать путь");
+  }
 }
 
 function revealPathInTree(path) {

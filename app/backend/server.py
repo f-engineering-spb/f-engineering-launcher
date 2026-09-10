@@ -782,6 +782,65 @@ def render_dwg_model(path: Path, dpi: int = DEFAULT_PDF_DPI) -> dict:
     return document
 
 
+def set_windows_clipboard(text: str) -> bool:
+    if os.name != "nt":
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+
+        user32.OpenClipboard.argtypes = [wintypes.HWND]
+        user32.OpenClipboard.restype = wintypes.BOOL
+        user32.EmptyClipboard.argtypes = []
+        user32.EmptyClipboard.restype = wintypes.BOOL
+        user32.SetClipboardData.argtypes = [wintypes.UINT, wintypes.HANDLE]
+        user32.SetClipboardData.restype = wintypes.HANDLE
+        user32.CloseClipboard.argtypes = []
+        user32.CloseClipboard.restype = wintypes.BOOL
+
+        kernel32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
+        kernel32.GlobalAlloc.restype = wintypes.HGLOBAL
+        kernel32.GlobalLock.argtypes = [wintypes.HGLOBAL]
+        kernel32.GlobalLock.restype = wintypes.LPVOID
+        kernel32.GlobalUnlock.argtypes = [wintypes.HGLOBAL]
+        kernel32.GlobalUnlock.restype = wintypes.BOOL
+
+        GMEM_MOVEABLE = 0x0002
+        CF_UNICODETEXT = 13
+
+        normalized_text = os.path.normpath(text)
+
+        if not user32.OpenClipboard(None):
+            return False
+        try:
+            user32.EmptyClipboard()
+            encoded = (normalized_text + "\0").encode("utf-16le")
+            h_mem = kernel32.GlobalAlloc(GMEM_MOVEABLE, len(encoded))
+            if not h_mem:
+                return False
+            p_mem = kernel32.GlobalLock(h_mem)
+            if not p_mem:
+                return False
+            ctypes.memmove(p_mem, encoded, len(encoded))
+            kernel32.GlobalUnlock(h_mem)
+            return bool(user32.SetClipboardData(CF_UNICODETEXT, h_mem))
+        finally:
+            user32.CloseClipboard()
+    except Exception:
+        try:
+            subprocess.run(
+                ["powershell", "-NoProfile", "-Command", "Set-Clipboard", "-Value", text],
+                timeout=3,
+                check=True
+            )
+            return True
+        except Exception:
+            return False
+
+
 def launch_native_file(path: Path) -> str:
     """Показать файл или папку в Проводнике Windows без привязки к путям EXE."""
     if not path.exists():
@@ -791,19 +850,39 @@ def launch_native_file(path: Path) -> str:
         subprocess.Popen(["xdg-open", str(path)])
         return "xdg-open"
 
-    resolved = str(path.resolve())
-    if path.is_dir():
-        subprocess.Popen(["explorer.exe", resolved])
-        return "explorer-open-folder"
-    subprocess.Popen(["explorer.exe", "/select,", resolved])
-    return "explorer-select"
+    resolved = os.path.normpath(str(path.resolve()))
 
     try:
         import ctypes
-        # Allow newly spawned window to take foreground focus immediately
+        # Разрешаем новому окну Проводника выйти на передний план
         ctypes.windll.user32.AllowSetForegroundWindow(ctypes.c_uint32(0xFFFFFFFF))
     except Exception:
         pass
+
+    # 1. Если это ПАПКА — открываем саму папку в Проводнике Windows
+    if path.is_dir():
+        try:
+            os.startfile(resolved)
+            return "explorer-open-folder-startfile"
+        except Exception:
+            subprocess.Popen(f'explorer.exe "{resolved}"')
+            return "explorer-open-folder-cmd"
+
+    # 2. Если это ФАЙЛ — открываем Проводник с ВЫДЕЛЕНИЕМ этого файла
+    # ВАЖНО: explorer.exe /select,"<path>" передаётся единой строкой,
+    # чтобы subprocess не вставлял пробел между запятой и путем!
+    try:
+        cmd = f'explorer.exe /select,"{resolved}"'
+        subprocess.Popen(cmd)
+        return "explorer-select"
+    except Exception:
+        parent_dir = os.path.dirname(resolved)
+        try:
+            os.startfile(parent_dir)
+            return "explorer-parent-startfile"
+        except Exception:
+            subprocess.Popen(f'explorer.exe "{parent_dir}"')
+            return "explorer-parent-cmd"
 
     suffix = path.suffix.casefold()
 
@@ -2134,6 +2213,20 @@ class LauncherHandler(BaseHTTPRequestHandler):
                         "elapsedMs": round((time.perf_counter() - started) * 1000),
                     }
                 )
+                self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
+            return
+
+        if parsed.path == "/api/clipboard":
+            try:
+                body = self.read_json()
+                raw_text = str(body.get("text", "")).strip()
+                if not raw_text:
+                    raise ValueError("Текст для копирования не передан")
+                ok = set_windows_clipboard(raw_text)
+                if not ok:
+                    raise RuntimeError("Не удалось записать текст в буфер обмена Windows")
+                self.send_json(HTTPStatus.OK, {"ok": True, "text": raw_text})
+            except Exception as error:
                 self.send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
             return
 
