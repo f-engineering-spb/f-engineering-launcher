@@ -842,9 +842,9 @@ def set_windows_clipboard(text: str) -> bool:
 
 
 def launch_native_file(path: Path) -> str:
-    """Показать файл или папку в Проводнике Windows без зависаний и создания зомби-процессов."""
+    """Показать файл или папку в Проводнике Windows без зависаний."""
     if not path.exists():
-        raise FileNotFoundError(f"Файл не найден: {path}")
+        raise FileNotFoundError(f"Файл или папка не найдены: {path}")
 
     if os.name != "nt":
         target = path if path.is_dir() else path.parent
@@ -861,15 +861,22 @@ def launch_native_file(path: Path) -> str:
     except Exception:
         pass
 
-    # Открываем директорию через нативный ShellExecute (os.startfile).
-    # Это мгновенно открывает окно Проводника Windows, не создаёт фоновых процессов
-    # explorer.exe и надёжно работает как на локальных дисках, так и на Google Диске (H:\).
     try:
-        os.startfile(target_dir)
-        return "explorer-open-folder"
+        if path.is_dir():
+            cmd = f'explorer.exe "{resolved}"'
+            subprocess.Popen(cmd)
+            return "explorer-open-folder"
+        else:
+            cmd = f'explorer.exe /select,"{resolved}"'
+            subprocess.Popen(cmd)
+            return "explorer-select"
     except Exception:
-        subprocess.Popen(["cmd.exe", "/c", "start", "", target_dir], shell=True)
-        return "explorer-open-cmd"
+        try:
+            os.startfile(target_dir)
+            return "explorer-open-folder-fallback"
+        except Exception:
+            subprocess.Popen(["cmd.exe", "/c", "start", "", target_dir], shell=True)
+            return "explorer-open-cmd"
 
     suffix = path.suffix.casefold()
 
@@ -1857,11 +1864,8 @@ class LauncherHandler(BaseHTTPRequestHandler):
                     raw_path = str(REPO_ROOT)
                 target = Path(raw_path.strip('"')).resolve()
                 if target.exists():
-                    if target.is_dir():
-                        subprocess.Popen(["explorer.exe", str(target)])
-                    else:
-                        subprocess.Popen(["explorer.exe", "/select,", str(target)])
-                    self.send_json(HTTPStatus.OK, {"ok": True, "path": str(target)})
+                    mode = launch_native_file(target)
+                    self.send_json(HTTPStatus.OK, {"ok": True, "path": str(target), "mode": mode})
                 else:
                     self.send_json(HTTPStatus.NOT_FOUND, {"error": f"Путь не найден: {target}"})
             except Exception as error:
@@ -1882,7 +1886,6 @@ class LauncherHandler(BaseHTTPRequestHandler):
                     errors="strict",
                     timeout=120,
                     env=choose_env,
-                    **hidden_process_kwargs(),
                 )
                 raw = proc.stdout.strip()
                 files = []
@@ -2284,7 +2287,10 @@ def main() -> None:
     (RUNTIME_DIR / "logs").mkdir(exist_ok=True)
 
     server = ThreadingHTTPServer((args.host, args.port), LauncherHandler)
-    print(f"F-Engineering Launcher v3: http://{args.host}:{args.port}/", flush=True)
+    try:
+        print(f"F-Engineering Launcher v3: http://{args.host}:{args.port}/", flush=True)
+    except (ValueError, OSError, AttributeError):
+        pass
     server.serve_forever()
 
 

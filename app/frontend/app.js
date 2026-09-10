@@ -129,10 +129,10 @@ function setTreeBrowseMode(enabled) {
 function updateObjectButtons() {
   const hasSelection = Boolean(state.selectedObjectId);
   const tree = inTreeMode();
-  els.load.disabled = tree;
+  els.load.disabled = false;
   els.refresh.disabled = !hasSelection;
   els.display.disabled = !hasSelection && !tree;
-  els.exclude.disabled = tree || !hasSelection;
+  els.exclude.disabled = !hasSelection;
 }
 
 function updateObjectStats() {
@@ -1218,12 +1218,35 @@ function toggleFolderNode(node, nodeEl) {
   rebuildVisibleRows();
 }
 
+function treeFilteringActive() {
+  // Поиск, фильтр расширения или фильтр изменений: дерево показываем
+  // раскрытым, иначе совпадения внутри свёрнутых папок не найти.
+  return Boolean(els.treeSearch.value.trim() || state.activeFilter || state.diffFilter);
+}
+
+function collapseAllFolders() {
+  // Большие объекты (десятки тысяч файлов) открываем свёрнутыми:
+  // рисуются только верхние строки, остальное — по клику.
+  state.collapsedFolders.clear();
+  if (!state.currentManifest?.tree) return;
+  const stack = [state.currentManifest.tree];
+  while (stack.length) {
+    const node = stack.pop();
+    for (const child of node.children || []) {
+      if (child.type === "folder") {
+        state.collapsedFolders.add(child.path);
+        stack.push(child);
+      }
+    }
+  }
+}
+
 function renderTreeNode(node, parent) {
   if (!nodeMatches(node)) return;
 
   const nodeEl = document.createElement("div");
   nodeEl.className = "tree-node";
-  const collapsed = state.collapsedFolders.has(node.path);
+  const collapsed = state.collapsedFolders.has(node.path) && !treeFilteringActive();
   if (node.type === "folder" && !collapsed) {
     nodeEl.classList.add("expanded");
   }
@@ -1504,7 +1527,7 @@ async function openSelectedObject() {
   state.revealedPath = "";
   state.activeFilter = "";
   state.diffFilter = false;
-  state.collapsedFolders.clear();
+  collapseAllFolders();
   state.renderedPages = [];
   pdfPairCache.clear();
   diffCountsCache.clear();

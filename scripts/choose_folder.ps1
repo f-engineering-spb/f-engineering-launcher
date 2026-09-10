@@ -14,8 +14,11 @@ public static class ModernFolderPicker
     private const uint FOS_FORCEFILESYSTEM = 0x40;
     private const uint SIGDN_FILESYSPATH = 0x80058000;
 
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
+
     [ComImport]
-    [Guid("DC1C5A9C-E88A-4DDE-A5A6-60E4DB1AE11E")]
+    [Guid("DC1C5A9C-E88A-4DDE-A5A1-60F82A20AEF7")]
     private class DialogRCW { }
 
     [ComImport]
@@ -50,7 +53,8 @@ public static class ModernFolderPicker
         var dlg = (IFileOpenDialog)new DialogRCW();
         dlg.SetOptions(FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM);
         dlg.SetTitle(title);
-        if (dlg.Show(IntPtr.Zero) != 0) return null;
+        IntPtr parent = GetForegroundWindow();
+        if (dlg.Show(parent) != 0) return null;
         IShellItem item;
         dlg.GetResult(out item);
         IntPtr ptr;

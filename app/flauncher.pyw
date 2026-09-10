@@ -48,6 +48,39 @@ def is_port_free(port: int) -> bool:
         return False
 
 
+def reap_stale_server(port: int) -> None:
+    # Порт занят, но сервер на нём не отвечает: гасим зависший процесс,
+    # если это точно наш backend. Чужие процессы не трогаем.
+    # Лучше стараться, чем бросать: при неудаче просто идём дальше.
+    try:
+        out = subprocess.run(
+            ["netstat", "-ano", "-p", "TCP"],
+            capture_output=True, text=True, timeout=10,
+        ).stdout
+    except Exception:
+        return
+    pids = set()
+    for line in (out or "").splitlines():
+        parts = line.split()
+        if len(parts) >= 5 and parts[0] == "TCP" \
+                and parts[1].endswith(":%d" % port) and parts[3] == "LISTENING":
+            if parts[4].isdigit():
+                pids.add(parts[4])
+    for pid in pids:
+        try:
+            ps = subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 "(Get-CimInstance Win32_Process -Filter \"ProcessId=%s\").CommandLine" % pid],
+                capture_output=True, text=True, timeout=15,
+            )
+            if BACKEND in (ps.stdout or ""):
+                subprocess.run(["taskkill", "/F", "/PID", pid],
+                               capture_output=True, timeout=15)
+                log("Reaped stale server pid %s on port %d" % (pid, port))
+        except Exception:
+            pass
+
+
 def find_or_start_server() -> int:
     # 1. Проверяем, может сервер уже работает на одном из портов 8780..8789
     for p in range(8780, 8790):
@@ -55,7 +88,13 @@ def find_or_start_server() -> int:
             log(f"Found already healthy server on port {p}")
             return p
 
-    # 2. Ищем первый свободный порт
+    # 2. Порт занят, но никто не отвечает: добиваем зависший backend
+    # и только потом ищем свободный порт.
+    for p in range(8780, 8790):
+        if not is_server_healthy(p) and not is_port_free(p):
+            reap_stale_server(p)
+
+    # 3. Ищем первый свободный порт
     target_port = None
     for p in range(8780, 8790):
         if is_port_free(p):
