@@ -20,11 +20,11 @@ if (-not (Test-Path $sourcePortable) -or -not (Test-Path $sourceZip)) {
 # 1. Поиск флешки
 $drive = $null
 if ($TargetDrive -ne "") {
-    $drive = Get-CimInstance Win32_LogicalDisk | Where-Object { $_.DeviceId -eq $TargetDrive.TrimEnd('\') }
+    $cleanDrive = $TargetDrive.TrimEnd('\')
+    $drive = Get-CimInstance Win32_LogicalDisk | Where-Object { $_.DeviceId -eq $cleanDrive }
 }
 
 if (-not $drive) {
-    # Ищем съемные диски (DriveType = 2)
     $removables = @(Get-CimInstance Win32_LogicalDisk | Where-Object { $_.DriveType -eq 2 })
     if ($removables.Count -eq 1) {
         $drive = $removables[0]
@@ -86,18 +86,18 @@ Write-Host "      ZIP-архив скопирован." -ForegroundColor Green
 Write-Host "[3/4] Создание корневых файлов быстрого запуска на флешке..." -ForegroundColor Cyan
 
 # Файл прямого запуска
-$runCmd = @"
+$runCmd = @'
 @echo off
 setlocal
 chcp 65001 >nul
 cd /d "%~dp0FEngineering_Launcher"
 call "Запуск_Лаунчера.cmd"
 endlocal
-"@
+'@
 [System.IO.File]::WriteAllText((Join-Path $usbRoot "🚀_Запуск_Лаунчера.cmd"), $runCmd, [System.Text.Encoding]::UTF8)
 
 # Файл установки на компьютер
-$installCmd = @"
+$installCmd = @'
 @echo off
 setlocal
 chcp 65001 >nul
@@ -106,26 +106,26 @@ echo    Установка F-Engineering Launcher на данный компью
 echo ========================================================================
 echo.
 echo Копирование файлов программы в локальный профиль пользователя...
-set "TARGET_DIR=%LOCALAPPDATA%\FEngineering_Launcher"
+set "TARGET_DIR=%LOCALAPPDATA%FEngineering_Launcher"
 if not exist "%TARGET_DIR%" mkdir "%TARGET_DIR%"
-xcopy "%~dp0FEngineering_Launcher\*" "%TARGET_DIR%\" /E /I /Y /Q >nul
+xcopy "%~dp0FEngineering_Launcher*" "%TARGET_DIR%" /E /I /Y /Q >nul
 
 echo Создание ярлыка на Рабочем столе...
-powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "`$wsh = New-Object -ComObject WScript.Shell; `$desktop = [Environment]::GetFolderPath('Desktop'); `$s = `$wsh.CreateShortcut(\"`$desktop\F-Engineering Launcher.lnk\"); `$s.TargetPath = '%TARGET_DIR%\runtime\python\pythonw.exe'; `$s.Arguments = '\"%TARGET_DIR%\app\flauncher.pyw\"'; `$s.WorkingDirectory = '%TARGET_DIR%'; `$ico = '%TARGET_DIR%\app\frontend\assets\flauncher.ico'; if (Test-Path `$ico) { `$s.IconLocation = `$ico + ',0' }; `$s.Save();"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$wsh = New-Object -ComObject WScript.Shell; $desktop = [Environment]::GetFolderPath('Desktop'); $s = $wsh.CreateShortcut("$desktopF-Engineering Launcher.lnk"); $s.TargetPath = '%TARGET_DIR%untimepythonpythonw.exe'; $s.Arguments = '"%TARGET_DIR%applauncher.pyw"'; $s.WorkingDirectory = '%TARGET_DIR%'; $ico = '%TARGET_DIR%approntendassetslauncher.ico'; if (Test-Path $ico) { $s.IconLocation = $ico + ',0' }; $s.Save();"
 
 echo.
 echo [OK] Установка успешно завершена!
 echo      Ярлык «F-Engineering Launcher» создан на вашем Рабочем столе.
 echo.
 echo Запуск приложения...
-start "" "%TARGET_DIR%\runtime\python\pythonw.exe" "%TARGET_DIR%\app\flauncher.pyw"
+start "" "%TARGET_DIR%untimepythonpythonw.exe" "%TARGET_DIR%applauncher.pyw"
 timeout /t 3 >nul
 endlocal
-"@
+'@
 [System.IO.File]::WriteAllText((Join-Path $usbRoot "💾_Установить_на_этот_компьютер.cmd"), $installCmd, [System.Text.Encoding]::UTF8)
 
 # Инструкция
-$readme = @"
+$readme = @'
 ========================================================================
    F-Engineering Launcher v3 — Автономный пакет (USB)
 ========================================================================
@@ -145,7 +145,7 @@ $readme = @"
 ВАРИАНТ 3 (Через архив):
 Если вы хотите отправить программу коллеге по почте или мессенджеру,
 возьмите файл «FEngineering_Launcher_v3_Portable.zip» (78 МБ).
-"@
+'@
 [System.IO.File]::WriteAllText((Join-Path $usbRoot "ИНСТРУКЦИЯ.txt"), $readme, [System.Text.Encoding]::UTF8)
 Write-Host "      Корневые файлы созданы." -ForegroundColor Green
 
