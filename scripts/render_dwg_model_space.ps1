@@ -37,6 +37,7 @@ try {
   $app.Visible = $false
   $document = $app.Documents.Open($InputPath, $true)
   $document.SetVariable("BACKGROUNDPLOT", 0)
+  try { $document.SetVariable("EXPERT", 5) } catch {}
 
   # Model Space overview: full A0 page, extents, scale-to-fit and no plotted
   # lineweights.  It is a fast visual map, not a replacement for CAD layouts.
@@ -77,6 +78,7 @@ try {
     throw "CAD-система не создала PDF-файл превью."
   }
 } finally {
+  try { [LauncherMessageFilter]::Revoke() } catch {}
   if ($document) { $document.Close($false) }
   if ($app) { $app.Quit() }
 }

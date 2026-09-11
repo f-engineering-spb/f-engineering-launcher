@@ -24,6 +24,42 @@ if (-not [string]::IsNullOrWhiteSpace($outputDir) -and -not (Test-Path -LiteralP
   } catch {}
 }
 
+if (-not ([System.Management.Automation.PSTypeName]'LauncherMessageFilter').Type) {
+  Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+
+[ComImport(), InterfaceType(ComInterfaceType.InterfaceIsIUnknown), Guid("00000016-0000-0000-C000-000000000046")]
+public interface IOleMessageFilter
+{
+    [PreserveSig] int HandleInComingCall(int dwCallType, IntPtr hTaskCaller, int dwTickCount, IntPtr lpInterfaceInfo);
+    [PreserveSig] int RetryRejectedCall(IntPtr hTaskCallee, int dwTickCount, int dwRejectType);
+    [PreserveSig] int MessagePending(IntPtr hTaskCallee, int dwTickCount, int dwPendingType);
+}
+
+public class LauncherMessageFilter : IOleMessageFilter
+{
+    [DllImport("ole32.dll")] private static extern int CoRegisterMessageFilter(IOleMessageFilter newFilter, out IOleMessageFilter oldFilter);
+    public static void Register() {
+        IOleMessageFilter newFilter = new LauncherMessageFilter();
+        IOleMessageFilter oldFilter = null;
+        CoRegisterMessageFilter(newFilter, out oldFilter);
+    }
+    public static void Revoke() {
+        IOleMessageFilter oldFilter = null;
+        CoRegisterMessageFilter(null, out oldFilter);
+    }
+    public int HandleInComingCall(int dwCallType, IntPtr hTaskCaller, int dwTickCount, IntPtr lpInterfaceInfo) { return 0; }
+    public int RetryRejectedCall(IntPtr hTaskCallee, int dwTickCount, int dwRejectType) {
+        if (dwRejectType == 2) return 100;
+        return -1;
+    }
+    public int MessagePending(IntPtr hTaskCallee, int dwTickCount, int dwPendingType) { return 2; }
+}
+"@
+}
+[LauncherMessageFilter]::Register()
+
 # Подключение к CAD через COM-интерфейс
 $comProgIds = @(
   "AutoCAD.Application.24",
@@ -59,6 +95,7 @@ try {
   # Открытие в режиме 'только чтение'
   $document = $app.Documents.Open($InputPath, $true)
   $document.SetVariable("BACKGROUNDPLOT", 0)
+  try { $document.SetVariable("EXPERT", 5) } catch {}
 
   # Проверка листов (Layouts)
   $candidateLayouts = @($document.Layouts | Where-Object { -not $_.ModelType } | Sort-Object TabOrder)
@@ -242,6 +279,7 @@ except ImportError:
   }
   Write-Output ($result | ConvertTo-Json -Compress)
 } finally {
+  try { [LauncherMessageFilter]::Revoke() } catch {}
   if ($document) {
     try { $document.Close($false) } catch {}
   }
