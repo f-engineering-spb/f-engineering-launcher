@@ -949,6 +949,19 @@ textarea:focus {
   display: none !important;
 }
 
+/* Во 2-м режиме базовый размер увеличен на 50% (165px * 1.5 = 248px, 120px * 1.5 = 180px, 138px * 1.5 = 207px) */
+.shell.medium-view .pdf-thumb img {
+  max-height: calc(248px * var(--thumb-scale));
+}
+
+.shell.medium-view .missing-preview-card {
+  min-height: calc(180px * var(--thumb-scale));
+}
+
+.shell.medium-view .excel-book-preview {
+  height: calc(207px * var(--thumb-scale));
+}
+
 .missing-preview-card {
   display: grid;
   min-height: calc(120px * var(--thumb-scale));
