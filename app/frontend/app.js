@@ -3224,6 +3224,10 @@ async function renderSelectedPdfFiles(previewItems = collectPreviewFilesForDispl
   let nextBatchIndex = 0;
   let completedBatches = batches.length - renderableBatchCount;
   let completedFiles = 0;
+  // Счётчики только для DWG: пачки DWG_MODEL всегда по одному файлу,
+  // текст «Модель N из M» опирается на них, а не на общий completedFiles.
+  const totalDwgFiles = itemsToRender.filter((item) => item?.previewType === "DWG_MODEL").length;
+  let completedDwgFiles = 0;
   const renderStartTime = Date.now();
 
   const firstItem = itemsToRender[0];
@@ -3299,7 +3303,12 @@ async function renderSelectedPdfFiles(previewItems = collectPreviewFilesForDispl
     while (!batchDone && attempt < 2) {
       attempt += 1;
       if (attempt > 1 && !isSingle) {
-        els.progressDetail.textContent = `PDF ${completedFiles} из ${itemsToRender.length} · повторная попытка: ${itemsToFetch[0]?.name || "пачка"}`;
+        els.progressDetail.textContent = (isDwg && totalDwgFiles > 0)
+          ? `Модель ${completedDwgFiles + 1} из ${totalDwgFiles}: ${itemsToFetch[0]?.name || "чертёж"} — повторная попытка…`
+          : `PDF ${completedFiles} из ${itemsToRender.length} · повторная попытка: ${itemsToFetch[0]?.name || "пачка"}`;
+      }
+      if (attempt === 1 && isDwg && totalDwgFiles > 0 && !state.progressCancelled) {
+        els.progressDetail.textContent = `Модель ${completedDwgFiles + 1} из ${totalDwgFiles}: ${itemsToFetch[0]?.name || "чертёж"} — рендерится…`;
       }
     try {
       controller = new AbortController();
@@ -3419,6 +3428,7 @@ async function renderSelectedPdfFiles(previewItems = collectPreviewFilesForDispl
   if (!state.progressCancelled && state.renderEpoch === myEpoch) {
     completedBatches += 1;
     completedFiles += batch.length;
+    if ((batch[0]?.previewType) === "DWG_MODEL") completedDwgFiles += itemsToFetch.length;
     refreshRenderProgress();
   }
 }
@@ -3451,8 +3461,11 @@ async function renderSelectedPdfFiles(previewItems = collectPreviewFilesForDispl
   updateRibbonLoadMore();
 
   const errorCount = allErrors.length;
+  const isSingleDwg = isSingle && itemsToRender[0]?.previewType === "DWG_MODEL";
   const detail = isSingle
-    ? (errorCount ? "Не удалось открыть документ" : `Готово: ${totalPages} страниц`)
+    ? (errorCount
+      ? (isSingleDwg && allErrors[0]?.error ? `Не удалось открыть документ: ${allErrors[0].error}` : "Не удалось открыть документ")
+      : `Готово: ${totalPages} страниц`)
     : (errorCount
       ? `Показано: ${renderedPages} из ${totalPages} стр. · ошибок: ${errorCount}`
       : `Готово: ${state.totalPreviewCount || itemsToRender.length} файлов · стр. ${renderedPages} из ${totalPages}`);
@@ -3465,6 +3478,11 @@ async function loadMorePdfFiles(itemsToRender) {
   let nextBatchIndex = 0;
   let completedBatches = 0;
   let completedFiles = 0;
+  // Те же DWG-счётчики, что в основном показе; плюс счётчик ошибок пачек
+  // для честной строки финиша.
+  const totalDwgFiles = itemsToRender.filter((item) => item?.previewType === "DWG_MODEL").length;
+  let completedDwgFiles = 0;
+  let loadErrors = 0;
   const loadStartTime = Date.now();
   // Продолжение текущего показа: фиксируем его эпоху, чтобы подгрузка
   // сама гасла, если пользователь тем временем начал новый показ.
@@ -3521,6 +3539,9 @@ async function loadMorePdfFiles(itemsToRender) {
     let batchDone = false;
     while (!batchDone && attempt < 2) {
       attempt += 1;
+      if (attempt === 1 && isDwg && totalDwgFiles > 0 && !state.progressCancelled) {
+        els.progressDetail.textContent = `Модель ${completedDwgFiles + 1} из ${totalDwgFiles}: ${itemsToFetch[0]?.name || "чертёж"} — рендерится…`;
+      }
     try {
       controller = new AbortController();
       state.operationControllers.push(controller);
@@ -3571,6 +3592,7 @@ async function loadMorePdfFiles(itemsToRender) {
           message: payload.error || "Ошибка превью. Откройте файл через кнопку «Открыть».",
         }));
       if (state.renderEpoch === myEpoch) await appendPagesToViewer(errCards, null, myEpoch);
+      loadErrors += itemsToFetch.length;
       batchDone = true;
       }
     } catch (err) {
@@ -3588,6 +3610,7 @@ async function loadMorePdfFiles(itemsToRender) {
             : "Ошибка рендеринга. Откройте файл через кнопку «Открыть».",
         }));
         if (state.renderEpoch === myEpoch) await appendPagesToViewer(errCards, null, myEpoch);
+        loadErrors += itemsToFetch.length;
         batchDone = true;
       } finally {
       if (controller) {
@@ -3599,6 +3622,7 @@ async function loadMorePdfFiles(itemsToRender) {
   if (!state.progressCancelled && state.renderEpoch === myEpoch) {
     completedBatches += 1;
     completedFiles += batch.length;
+    if ((batch[0]?.previewType) === "DWG_MODEL") completedDwgFiles += itemsToFetch.length;
     refreshRenderProgress();
   }
 }
@@ -3627,7 +3651,7 @@ async function loadMorePdfFiles(itemsToRender) {
   if (state.progressCancelled) return;
 
   updateRibbonLoadMore();
-  finishProgress("Дополнительные превью загружены");
+  finishProgress(loadErrors > 0 ? `Дополнительные превью загружены · ошибок: ${loadErrors}` : "Дополнительные превью загружены");
 }
 
 
