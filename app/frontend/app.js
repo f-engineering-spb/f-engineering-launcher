@@ -1012,7 +1012,7 @@ function hasDiffChanges(manifest) {
   return Boolean(diff && ((diff.added || []).length || (diff.changed || []).length || (diff.removed || []).length));
 }
 
-function selectNode(node, event = {}) {
+function selectNode(node, event = {}, options = {}) {
   const index = state.visibleRows.findIndex((item) => item.path === node.path);
   if (event.shiftKey && state.lastSelectedIndex !== null) {
     const start = Math.min(state.lastSelectedIndex, index);
@@ -1038,7 +1038,7 @@ function selectNode(node, event = {}) {
     if (selectedItem && selectedItem.type === "file") {
       setActiveNativePath(selectedItem.path);
       state.revealedPath = selectedItem.path;
-      syncSelectionToPreview(selectedItem);
+      if (!options.deferPreview) syncSelectionToPreview(selectedItem);
     } else {
       setActiveNativePath("");
       state.revealedPath = "";
@@ -1048,6 +1048,31 @@ function selectNode(node, event = {}) {
     state.revealedPath = "";
   }
   updateTreeSelectionHighlight();
+}
+
+// Выбор из ленты миниатюр: та же логика, что в дереве (одиночный /
+// Shift-диапазон / Ctrl), но без автооткрытия превью — его запускает
+// сам обработчик карточки. Якорь общий (state.lastSelectedIndex).
+function selectRailPath(path, event = {}) {
+  if (!path) return false;
+  const norm = String(path).replace(/\//g, "\\").toLowerCase();
+  const node = state.visibleRows.find(
+    (item) => String(item.path || "").replace(/\//g, "\\").toLowerCase() === norm
+  ) || null;
+  if (!node) {
+    // Файла нет в видимых строках: честная одиночная метка без якоря.
+    if (!event.shiftKey && !event.ctrlKey && !event.metaKey) {
+      state.selectedPaths.clear();
+      state.selectedPaths.add(path);
+      state.lastSelectedIndex = null;
+      setActiveNativePath(path);
+      state.revealedPath = path;
+      updateTreeSelectionHighlight();
+    }
+    return true;
+  }
+  selectNode(node, event, { deferPreview: true });
+  return true;
 }
 
 function syncSelectionToPreview(fileNode) {
@@ -1225,6 +1250,34 @@ function updateTreeSelectionHighlight() {
     r.classList.toggle("selected", isSelected);
     r.classList.toggle("thumb-reveal", isRevealed);
   }
+  updateRailSelectionHighlight();
+}
+
+// Подсветка выделения на карточках ленты: карточка подсвечена, если её
+// файл входит в state.selectedPaths. Активная (текущий просмотр) рамка
+// (.active) живёт отдельно и не трогается.
+function updateRailSelectionHighlight() {
+  if (!els.pdfThumbs) return;
+  const norms = new Set(
+    Array.from(state.selectedPaths).map((p) => String(p || "").replace(/\//g, "\\").toLowerCase())
+  );
+  els.pdfThumbs.querySelectorAll(".pdf-thumb").forEach((thumb) => {
+    let p = "";
+    try {
+      if (thumb.classList.contains("excel-book-thumb") && thumb.dataset.workbookIndex !== undefined) {
+        p = state.excelWorkbooks?.[Number(thumb.dataset.workbookIndex)]?.path || "";
+      } else if (thumb.dataset.pageKey) {
+        const page = state.renderedPages.find((x) => {
+          try { return pageKey(x) === thumb.dataset.pageKey; } catch (_) { return false; }
+        });
+        p = page ? thumbPathForPage(page) : "";
+      }
+    } catch (_) {
+      p = "";
+    }
+    const hit = Boolean(p) && norms.has(String(p).replace(/\//g, "\\").toLowerCase());
+    thumb.classList.toggle("selected", hit);
+  });
 }
 
 function rebuildVisibleRows() {
@@ -1696,6 +1749,7 @@ function renderFormats() {
         ? state.visibleRows.findIndex((item) => item.path === firstChipSel)
         : -1;
       state.lastSelectedIndex = firstChipIdx >= 0 ? firstChipIdx : null;
+      updateRailSelectionHighlight();
     });
     button.addEventListener("dblclick", (event) => {
       event.stopPropagation();
@@ -1720,6 +1774,7 @@ function renderFormats() {
         ? state.visibleRows.findIndex((item) => item.path === firstDblSel)
         : -1;
       state.lastSelectedIndex = firstDblIdx >= 0 ? firstDblIdx : null;
+      updateRailSelectionHighlight();
       renderSelectedFiles().catch(showOperationError);
     });
     els.formatStrip.append(button);
@@ -2164,6 +2219,7 @@ function renderExcelWorkbookRail() {
     existingThumbs.forEach((thumb, index) => {
       thumb.classList.toggle("active", index === state.excelWorkbookIndex);
     });
+    updateRailSelectionHighlight();
     return;
   }
   els.pdfThumbs.replaceChildren();
@@ -2197,6 +2253,9 @@ function renderExcelWorkbookRail() {
       event.stopPropagation();
       state.activeNavZone = "thumbs";
       thumb.focus();
+      // Выбор как в дереве; превью — только по обычному клику (как раньше).
+      if (workbook.path) selectRailPath(workbook.path, event);
+      if (event.shiftKey || event.ctrlKey || event.metaKey) return;
       if (excelClickTimer) return;
       excelClickTimer = setTimeout(() => {
         excelClickTimer = null;
@@ -2224,6 +2283,7 @@ function renderExcelWorkbookRail() {
     });
     els.pdfThumbs.append(wrap);
   });
+  updateRailSelectionHighlight();
 }
 
 async function activateExcelWorkbook(index) {
@@ -2332,6 +2392,10 @@ function createPageThumbElement(page) {
   thumb.addEventListener("click", (event) => {
     event.stopPropagation();
     state.activeNavZone = "thumbs";
+    // Выбор как в дереве; превью — только по обычному клику (как раньше).
+    const docPath = thumbPathForPage(page);
+    if (docPath) selectRailPath(docPath, event);
+    if (event.shiftKey || event.ctrlKey || event.metaKey) return;
     showPdfPage(page);
     thumb.scrollIntoView({ behavior: "smooth", block: "center", inline: "center" });
   });
@@ -2449,6 +2513,7 @@ async function appendPagesToViewer(pages, insertAfterKey = null, epoch = null) {
   } else {
     updateActivePdfThumb();
   }
+  updateRailSelectionHighlight();
 }
 
 function updateRibbonLoadMore() {
@@ -4073,6 +4138,19 @@ if (els.pdfThumbs) {
   els.pdfThumbs.addEventListener("pointerdown", () => { state.activeNavZone = "thumbs"; });
   els.pdfThumbs.addEventListener("mouseenter", () => { state.activeNavZone = "thumbs"; });
   els.pdfThumbs.addEventListener("focusin", () => { state.activeNavZone = "thumbs"; });
+  els.pdfThumbs.addEventListener("click", (event) => {
+    // Клик по пустому месту ленты (мимо карточек): снять всё выделение.
+    // Клики по карточкам сюда не доходят (stopPropagation в карточке).
+    // Превью при этом не трогаем.
+    if (event.target.closest(".pdf-thumb")) return;
+    if (!state.selectedPaths.size && !state.revealedPath) return;
+    state.activeNavZone = "thumbs";
+    state.selectedPaths.clear();
+    state.revealedPath = "";
+    state.lastSelectedIndex = null;
+    setActiveNativePath("");
+    updateTreeSelectionHighlight();
+  });
 }
 if (els.objectTree) {
   els.objectTree.addEventListener("pointerdown", () => { state.activeNavZone = "tree"; });

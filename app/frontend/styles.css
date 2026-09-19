@@ -1078,7 +1078,8 @@ textarea:focus {
   background: #f2f7fc;
 }
 
-.pdf-thumb.active {
+.pdf-thumb.active,
+.pdf-thumb.selected {
   border-color: #3399ff;
   background: #ebf4fc;
   box-shadow: 0 0 0 1px #3399ff;
