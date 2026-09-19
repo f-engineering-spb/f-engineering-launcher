@@ -168,7 +168,7 @@ Office, DMS or AI-chat replacement.
 ### 4. Sources of truth
 
 - GitHub (`f-engineering-spb/f-engineering-launcher`) is the only source
-  of code and commit history. Working branch: `review/v3.3-updates`.
+  of code and commit history. Working branch: `dvg-main`.
 - The local copy on SSD (e.g.
   `C:\Users\u301\Documents\Codex\f-engineering-launcher`) is the only
   working copy of the code.
@@ -231,3 +231,23 @@ Office, DMS or AI-chat replacement.
 - DWG work must not break: object loading, file tree, ribbon + viewer,
   native operations, the Load button. Keep DWG changes in small
   separate commits.
+
+### 11. Sole current baseline (dvg-main)
+
+ЕДИНСТВЕННАЯ АКТУАЛЬНАЯ БАЗА
+
+Единственная актуальная ветка проекта — dvg-main.
+
+Работать нужно только из текущего репозитория и только после:
+
+git switch dvg-main
+
+История до текущего состояния намеренно не используется.
+Старые ветки, теги, коммиты, архивы и внешние копии не являются источниками кода.
+Не искать и не восстанавливать прежние версии.
+Не сравнивать текущий код со старыми версиями.
+Не использовать _BACKUP как рабочую базу.
+
+Внешняя папка _BACKUP не является актуальной рабочей базой.
+Единственная актуальная база — ветка dvg-main текущего репозитория.
+Старые локальные копии и архивы запрещено использовать без прямого указания пользователя.
