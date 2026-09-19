@@ -3024,6 +3024,28 @@ function chunkPreviewItems(items) {
 }
 
 const PDF_RENDER_CONCURRENCY = 3;
+// DWG рендерится через общий AutoCAD COM: параллельные запуски дерутся
+// за CAD-процесс, поэтому пачки DWG_MODEL идут строго по одной, а PDF —
+// по-прежнему до трёх параллельно. Семафор общий на все показы: эпохи
+// и отмена проверяются внутри renderBatch, зависший слот отдаётся в finally.
+const DWG_RENDER_CONCURRENCY = 1;
+let dwgActiveCount = 0;
+const dwgWaiters = [];
+function acquireDwgSlot() {
+  if (dwgActiveCount < DWG_RENDER_CONCURRENCY) {
+    dwgActiveCount += 1;
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => dwgWaiters.push(resolve));
+}
+function releaseDwgSlot() {
+  dwgActiveCount = Math.max(0, dwgActiveCount - 1);
+  const next = dwgWaiters.shift();
+  if (next) {
+    dwgActiveCount += 1;
+    next();
+  }
+}
 const PDF_FETCH_TIMEOUT_MS = 300000;
 // 15 секунд молотили /api/objects/diff каждые 15 с (живое облако H:, полный
 // скан на каждое изменение) и могли перезагружать дерево под руками. 10 минут.
@@ -3405,7 +3427,18 @@ async function renderSelectedPdfFiles(previewItems = collectPreviewFilesForDispl
     while (!state.progressCancelled && state.renderEpoch === myEpoch && nextBatchIndex < batches.length) {
       if (state.progressCancelled || state.renderEpoch !== myEpoch) break;
       const batchIndex = nextBatchIndex++;
-      await renderBatch(batchIndex);
+      // Пачки DWG_MODEL — строго по одной через общий семафор (CAD-COM),
+      // остальные типы разбираются параллельно как раньше.
+      if ((batches[batchIndex][0]?.previewType) === "DWG_MODEL") {
+        await acquireDwgSlot();
+        try {
+          await renderBatch(batchIndex);
+        } finally {
+          releaseDwgSlot();
+        }
+      } else {
+        await renderBatch(batchIndex);
+      }
     }
   }
 
@@ -3574,7 +3607,18 @@ async function loadMorePdfFiles(itemsToRender) {
     while (!state.progressCancelled && state.renderEpoch === myEpoch && nextBatchIndex < batches.length) {
       if (state.progressCancelled || state.renderEpoch !== myEpoch) break;
       const batchIndex = nextBatchIndex++;
-      await renderBatch(batchIndex);
+      // Пачки DWG_MODEL — строго по одной через общий семафор (CAD-COM),
+      // остальные типы разбираются параллельно как раньше.
+      if ((batches[batchIndex][0]?.previewType) === "DWG_MODEL") {
+        await acquireDwgSlot();
+        try {
+          await renderBatch(batchIndex);
+        } finally {
+          releaseDwgSlot();
+        }
+      } else {
+        await renderBatch(batchIndex);
+      }
     }
   }
 
