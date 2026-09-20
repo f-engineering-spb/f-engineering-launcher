@@ -1121,6 +1121,45 @@ def _force_foreground(hwnd: int, show_cmd: int = 9) -> bool:
         return False
 
 
+def _center_window_on_screen(target_hwnd) -> bool:
+    """Поставить окно по центру основного экрана, не меняя размер и фокус.
+
+    Общая helper для обоих сторожей (custom-exe и system-default).
+    Развёрнутые/свёрнутые/нулевые окна пропускаем.
+    """
+    try:
+        import ctypes
+
+        u32 = ctypes.windll.user32
+
+        class _Rect(ctypes.Structure):
+            _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
+                        ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
+
+        if u32.IsZoomed(target_hwnd) or u32.IsIconic(target_hwnd):
+            return False
+        rect = _Rect()
+        if not u32.GetWindowRect(target_hwnd, ctypes.byref(rect)):
+            return False
+        width = rect.right - rect.left
+        height = rect.bottom - rect.top
+        if width <= 0 or height <= 0:
+            return False
+        screen_w = u32.GetSystemMetrics(0)
+        screen_h = u32.GetSystemMetrics(1)
+        if not screen_w or not screen_h:
+            return False
+        pos_x = max(0, (screen_w - width) // 2)
+        pos_y = max(0, (screen_h - height) // 2)
+        SWP_NOSIZE = 0x0001
+        SWP_NOZORDER = 0x0004
+        SWP_NOACTIVATE = 0x0010
+        return bool(u32.SetWindowPos(target_hwnd, 0, pos_x, pos_y, 0, 0,
+                                     SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE))
+    except Exception:
+        return False
+
+
 def _bring_window_to_front(title_part: str | None, cls_name: str | None,
                            timeout: float = 120.0, match_title: str = "", show_cmd: int = 9) -> None:
     """Фоном ждём новое окно и делаем его главным. Ответ API не блокирует.
@@ -1166,6 +1205,7 @@ def _bring_window_to_front(title_part: str | None, cls_name: str | None,
             deadline = _time.time() + timeout
             best = None
             last_try = 0.0
+            focus_fails = 0
             while _time.time() < deadline:
                 _time.sleep(0.5)
                 try:
@@ -1189,14 +1229,25 @@ def _bring_window_to_front(title_part: str | None, cls_name: str | None,
                 last_try = now
                 try:
                     _force_foreground(best, show_cmd)
+                    # Позицию правим независимо от фокуса: даже неудостоенное
+                    # фокуса окно останется по центру, а не в углу.
+                    try:
+                        _center_window_on_screen(best)
+                    except Exception:
+                        pass
                     _time.sleep(0.3)
                     try:
                         if u32.GetForegroundWindow() == best:
                             return
+                        focus_fails += 1
                     except Exception:
                         return
                 except Exception:
-                    pass
+                    focus_fails += 1
+                # Фокус не даётся подряд: дальше долбить — только мигать
+                # экраном. Позиция уже выправлена выше, выходим.
+                if focus_fails >= 6:
+                    return
         except Exception:
             pass
 
@@ -1218,6 +1269,9 @@ def _bring_explorer_to_front(target_dir: str, timeout: float = 120.0) -> None:
 
 def bring_native_window_to_front(pid: int, exe_path: str, timeout: float = 120.0) -> None:
     """Окно нативной программы — на передний план и на весь экран.
+
+    Окно AutoCAD дополнительно ставится по центру экрана (оно любит
+    открываться в левом верхнем углу).
 
     Windows не даёт фоновому серверу фокус напрямую (новое окно только
     мигает в панели задач), поэтому в фоновом потоке ждём главное окно
@@ -1271,6 +1325,14 @@ def bring_native_window_to_front(pid: int, exe_path: str, timeout: float = 120.0
             def _has_title(hwnd) -> bool:
                 try:
                     return u32.GetWindowTextLengthW(hwnd) > 0
+                except Exception:
+                    return False
+
+            def _center_on_screen(target_hwnd) -> bool:
+                # Позицию считает общий helper; здесь только делегирование,
+                # чтобы не разъезжались две копии логики.
+                try:
+                    return bool(_center_window_on_screen(target_hwnd))
                 except Exception:
                     return False
 
@@ -1358,6 +1420,14 @@ def bring_native_window_to_front(pid: int, exe_path: str, timeout: float = 120.0
                 _flog("no window found")
                 return
             _flog(f"target hwnd={hwnd}")
+            # AutoCAD любит вставать в левый верхний угол: дважды ставим
+            # окно по центру (до и после доводки фокуса), пока оно грузится.
+            is_cad = exe_name.startswith("acad")
+            if is_cad:
+                try:
+                    _flog(f"centered-before={_center_on_screen(hwnd)}")
+                except Exception:
+                    pass
             for _ in range(3):
                 try:
                     _force_foreground(hwnd, 3)
@@ -1372,6 +1442,11 @@ def bring_native_window_to_front(pid: int, exe_path: str, timeout: float = 120.0
                         break
                 except Exception:
                     break
+            if is_cad:
+                try:
+                    _flog(f"centered-after={_center_on_screen(hwnd)}")
+                except Exception:
+                    pass
         except Exception:
             pass
 
