@@ -62,7 +62,10 @@ function Invoke-NativeDwgPdfExport {
     [string]$LayoutName = 'Layout1',
     [scriptblock]$Trace = $null
   )
+  $markSw = [System.Diagnostics.Stopwatch]::StartNew()
+  $markPid = [System.Diagnostics.Process]::GetCurrentProcess().Id
   $traceFn = { param([string]$n) if ($Trace) { try { & $Trace $n } catch {} } }
+  $mark = { param([string]$n) & $traceFn (("MARK {0} pid={1} in='{2}' out='{3}' elapsed_ms={4}" -f $n, $markPid, $InputPath, $OutputPdf, [int]$markSw.ElapsedMilliseconds)) }
   if (-not (Test-Path -LiteralPath $InputPath -PathType Leaf)) {
     throw "DWG file not found: $InputPath"
   }
@@ -100,10 +103,27 @@ function Invoke-NativeDwgPdfExport {
   $psi.RedirectStandardOutput = $true
   $psi.RedirectStandardError = $true
   $proc = [System.Diagnostics.Process]::Start($psi)
+  & $mark 'ACCORECONSOLE_START'
+  & $mark ('ACCORECONSOLE_PROCESS_READY conpid={0}' -f $proc.Id)
+  & $mark 'PDF_EXPORT_COMMAND_START'
   try {
     $outTask = $proc.StandardOutput.ReadToEndAsync()
     $errTask = $proc.StandardError.ReadToEndAsync()
-    if (-not $proc.WaitForExit($TimeoutSec * 1000)) {
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    $timedOut = $false
+    $firstSeenLogged = $false
+    while (-not $proc.WaitForExit(500)) {
+      if (-not $firstSeenLogged -and (Test-Path -LiteralPath $OutputPdf)) {
+        try {
+          if ((Get-Item -LiteralPath $OutputPdf).Length -gt 0) {
+            $firstSeenLogged = $true
+            & $mark 'PDF_FILE_FIRST_SEEN'
+          }
+        } catch {}
+      }
+      if ((Get-Date) -ge $deadline) { $timedOut = $true; break }
+    }
+    if ($timedOut) {
       try { $proc.Kill() } catch {}
       throw ('NATIVE_EXPORT_BLOCKED: accoreconsole timeout after {0}s.' -f $TimeoutSec)
     }
@@ -112,6 +132,7 @@ function Invoke-NativeDwgPdfExport {
     try { if (-not $proc.HasExited) { $proc.Kill() } } catch {}
     try { $proc.Dispose() } catch {}
   }
+  & $mark ('ACCORECONSOLE_EXIT exitcode={0}' -f $proc.ExitCode)
   & $traceFn 'NATIVE_EXPORT_END'
 
   $logText = Read-NativeConsoleLog $consoleLog
@@ -141,6 +162,7 @@ function Invoke-NativeDwgPdfExport {
     if ($_.Exception.Message -like 'NATIVE_EXPORT_BLOCKED*') { throw }
     throw ('NATIVE_EXPORT_BLOCKED: cannot read output PDF: {0}' -f $_.Exception.Message)
   }
+  & $mark 'PDF_VALIDATED'
   return [ordered]@{
     ok        = $true
     pdfPath   = $OutputPdf

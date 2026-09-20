@@ -50,7 +50,11 @@ DWG_RENDER_TIMEOUT_SECONDS = 600
 DWG_MODEL_PAGE_TIMEOUT_SECONDS = 120
 DWG_DAEMON_SCRIPT = REPO_ROOT / "scripts" / "render_dwg_daemon.ps1"
 DWG_DAEMON_DIR = DWG_CACHE_DIR / "daemon"
-DWG_DAEMON_START_TIMEOUT_SECONDS = 240
+# Dispatcher spawn is fast (no CAD session): never wait minutes for ready.
+DWG_DAEMON_START_TIMEOUT_SECONDS = 30
+# Job acceptance window: dispatcher polls JobDir every second and writes
+# state.json synchronously on pickup. No 240s idle waits anywhere.
+DWG_DAEMON_SUBMIT_TIMEOUT_SECONDS = 10
 DWG_DAEMON_IDLE_MINUTES = 15
 MAX_XLSX_ROWS = 2000
 MAX_XLSX_COLS = 100
@@ -566,16 +570,33 @@ def _dwg_daemon_alive() -> bool:
     return proc is not None and proc.poll() is None
 
 
+def _dwg_timing(event: str, **fields) -> None:
+    """Append-only timing marker for the DWG dispatcher handshake.
+
+    Logging only: never raises, never changes control flow or JSON contract.
+    """
+    try:
+        record = {"t": datetime.now().isoformat(timespec="milliseconds"), "event": event}
+        record.update(fields)
+        (RUNTIME_DIR / "logs" / "dwg-timing.jsonl").open("a", encoding="utf-8").write(
+            json.dumps(record, ensure_ascii=False) + "\n"
+        )
+    except Exception:
+        pass
+
+
 def ensure_dwg_daemon() -> bool:
-    """Поднять долгоживущий CAD-конвертер (одна сессия на все файлы).
+    """Поднять диспетчер DWG (без CAD-сессии, только очередь job).
 
     Возвращает True, если демон готов принимать задания. При любой
     неудаче возвращает False — вызыватель откатится на разовый запуск.
+    Стартовый таймаут короткий: диспетчер пишет ready за секунды.
     """
     global _DWG_DAEMON_PROC
     with _DWG_DAEMON_LOCK:
         if _dwg_daemon_alive():
             return True
+        _dwg_timing("DAEMON_START_BEGIN")
         _DWG_DAEMON_PROC = None
         if not DWG_DAEMON_SCRIPT.exists():
             return False
@@ -627,12 +648,24 @@ def ensure_dwg_daemon() -> bool:
             if ready_file.exists():
                 # Проверяем, что ready от ЭТОГО запуска, а не stale от убитого демона.
                 try:
-                    ready_pid = int(
-                        json.loads(ready_file.read_text(encoding="utf-8")).get("pid") or 0
-                    )
+                    ready_data = json.loads(ready_file.read_text(encoding="utf-8"))
+                    ready_pid = int(ready_data.get("pid") or 0)
                 except Exception:
+                    ready_data = {}
                     ready_pid = 0
                 if ready_pid == _DWG_DAEMON_PROC.pid:
+                    global _DWG_DAEMON_GUID, _DWG_DAEMON_START_NS
+                    try:
+                        _DWG_DAEMON_GUID = str(ready_data.get("daemonGuid") or "")
+                    except Exception:
+                        _DWG_DAEMON_GUID = ""
+                    try:
+                        import time as _tmod
+
+                        _DWG_DAEMON_START_NS = int(_tmod.time_ns())
+                    except Exception:
+                        _DWG_DAEMON_START_NS = 0
+                    _dwg_timing("DAEMON_READY", daemon_pid=_DWG_DAEMON_PROC.pid)
                     return True
             time.sleep(0.5)
         try:
@@ -654,11 +687,13 @@ def kill_dwg_daemon(reason: str) -> None:
         proc = _DWG_DAEMON_PROC
         _DWG_DAEMON_PROC = None
     acad_pid = 0
+    ready_guid = ""
     try:
         _, ready_file, _ = _dwg_daemon_files()
         if ready_file.exists():
             info = json.loads(ready_file.read_text(encoding="utf-8"))
             acad_pid = int(info.get("acadPid") or 0)
+            ready_guid = str(info.get("daemonGuid") or "")
     except Exception:
         acad_pid = 0
     if proc is not None:
@@ -671,23 +706,393 @@ def kill_dwg_daemon(reason: str) -> None:
         except Exception:
             pass
     if acad_pid > 0:
+        # Убиваем только проверенно-свой CAD: guid из ready.json должен
+        # совпадать с запомненным при ensure; плюс образ, возраст и флаг.
+        policy = {
+            "image_allow": {"acad.exe"},
+            "require_automation": True,
+            "protected_pids": set(),
+        }
         try:
-            listed = subprocess.run(
-                ["tasklist", "/FI", f"PID eq {acad_pid}", "/FO", "CSV", "/NH"],
-                capture_output=True,
-                text=True,
-                timeout=15,
-                **hidden_process_kwargs(),
-            )
-            if "acad.exe" in listed.stdout.lower():
-                subprocess.run(
-                    ["taskkill", "/PID", str(acad_pid), "/F"],
-                    capture_output=True,
-                    timeout=15,
-                    **hidden_process_kwargs(),
-                )
+            if _DWG_DAEMON_GUID and ready_guid and ready_guid != _DWG_DAEMON_GUID:
+                policy["protected_pids"] = {acad_pid}
+            if _DWG_DAEMON_START_NS:
+                policy["min_created_ns"] = _DWG_DAEMON_START_NS
         except Exception:
             pass
+        try:
+            _kill_owned_acad(acad_pid, policy)
+        except Exception:
+            pass
+
+
+# --- P0: владение AutoCAD-сессиями (один job — один owned acad.exe) ---
+#
+# Правила:
+# - второй render одного нормализованного пути DWG запрещён, пока жив первый;
+# - убивать разрешено только проверенно-свой процесс (см. _check_cad_ownership);
+# - убийство по голому имени acad.exe запрещено везде в этом файле.
+_DWG_ACTIVE_PATHS: set[str] = set()
+_DWG_ACTIVE_LOCK = threading.Lock()
+_DWG_DAEMON_GUID: str = ""
+_DWG_DAEMON_START_NS: int = 0
+
+
+_DWG_ACTIVE_JOBS: dict[str, dict] = {}
+
+
+def normalize_dwg_path(path: object) -> str:
+    """Канонический ключ DWG для job-гейта: абс. путь + normcase.
+
+    Чистая функция (без обращений к диску/процессам) — покрыта unit-тестами.
+    """
+    try:
+        text = os.path.abspath(os.path.normpath(str(path)))
+    except Exception:
+        text = str(path)
+    try:
+        return os.path.normcase(text)
+    except Exception:
+        return text
+
+
+def make_dwg_job_key(path: object, size: int | None = None, mtime_ns: int | None = None) -> str:
+    """Ключ дедупликации: absolute normalized DWG path + size + mtime."""
+    norm = normalize_dwg_path(path)
+    if size is None or mtime_ns is None:
+        try:
+            p = Path(str(path))
+            if p.is_file():
+                st = p.stat()
+                size = st.st_size
+                mtime_ns = st.st_mtime_ns
+        except Exception:
+            pass
+    if size is not None and mtime_ns is not None:
+        return f"{norm}:{size}:{mtime_ns}"
+    return norm
+
+
+def _dwg_extract_norm_path(key: str) -> str:
+    """Безопасно извлечь нормализованный путь из canonical key или path без потери диска Windows."""
+    parts = str(key).rsplit(":", 2)
+    if len(parts) == 3 and parts[1].isdigit() and parts[2].isdigit():
+        return normalize_dwg_path(parts[0])
+    return normalize_dwg_path(key)
+
+
+def dwg_job_gate(path: object, size: int | None = None, mtime_ns: int | None = None) -> tuple[bool, str]:
+    """Занять слот рендера для DWG. (True, key) или (False, key) если уже идёт."""
+    key = make_dwg_job_key(path, size, mtime_ns)
+    norm = normalize_dwg_path(path)
+    with _DWG_ACTIVE_LOCK:
+        if key in _DWG_ACTIVE_PATHS or norm in _DWG_ACTIVE_PATHS:
+            return False, key
+        _DWG_ACTIVE_PATHS.add(key)
+        _DWG_ACTIVE_PATHS.add(norm)
+        return True, key
+
+
+def dwg_job_release(key: str) -> None:
+    """Освободить слот рендера. Безопасно вызывать повторно."""
+    with _DWG_ACTIVE_LOCK:
+        norm = _dwg_extract_norm_path(key)
+        _DWG_ACTIVE_PATHS.discard(key)
+        if norm:
+            _DWG_ACTIVE_PATHS.discard(norm)
+            to_discard = [p for p in _DWG_ACTIVE_PATHS if _dwg_extract_norm_path(p) == norm]
+            for p in to_discard:
+                _DWG_ACTIVE_PATHS.discard(p)
+        _DWG_ACTIVE_JOBS.pop(key, None)
+        if norm:
+            _DWG_ACTIVE_JOBS.pop(norm, None)
+            to_pop_jobs = [k for k in _DWG_ACTIVE_JOBS if _dwg_extract_norm_path(k) == norm]
+            for k in to_pop_jobs:
+                _DWG_ACTIVE_JOBS.pop(k, None)
+
+
+def dwg_job_set_state(key: str, state: dict) -> None:
+    """Обновить состояние активного job."""
+    with _DWG_ACTIVE_LOCK:
+        norm = _dwg_extract_norm_path(key)
+        _DWG_ACTIVE_JOBS[key] = state
+        if norm:
+            _DWG_ACTIVE_JOBS[norm] = state
+
+
+def dwg_job_get_state(key: str) -> dict | None:
+    """Получить снимок состояния job."""
+    with _DWG_ACTIVE_LOCK:
+        st = _DWG_ACTIVE_JOBS.get(key)
+        if not st:
+            norm = _dwg_extract_norm_path(key)
+            if norm:
+                st = _DWG_ACTIVE_JOBS.get(norm)
+        return dict(st or {}) or None
+
+
+def _check_cad_ownership(info: dict, policy: dict) -> tuple[bool, str]:
+    """Чистая проверка владения CAD-процессом. Только данные, без Win32.
+
+    info:   {pid, image, parent, created_ns, cmdline}
+    policy: {image_allow: set[str], expect_parent: int|None,
+             min_created_ns: int|None, require_automation: bool,
+             protected_pids: set[int]}
+    Возвращает (owned, reason). Покрыта unit-тестами на фиктивных данных.
+    """
+    try:
+        pid = int(info.get("pid") or 0)
+    except (TypeError, ValueError):
+        return False, "bad-pid"
+    if pid <= 0:
+        return False, "bad-pid"
+    protected = policy.get("protected_pids") or set()
+    try:
+        if pid in set(protected):
+            return False, "protected-pid"
+    except TypeError:
+        pass
+    image = str(info.get("image") or "").casefold()
+    allowed = policy.get("image_allow") or {"acad.exe"}
+    try:
+        if image not in set(allowed):
+            return False, "wrong-image"
+    except TypeError:
+        return False, "wrong-image"
+    expect_parent = policy.get("expect_parent")
+    if expect_parent is not None:
+        try:
+            if int(info.get("parent") or 0) != int(expect_parent):
+                return False, "parent-mismatch"
+        except (TypeError, ValueError):
+            return False, "parent-mismatch"
+    min_created = policy.get("min_created_ns")
+    if min_created is not None:
+        try:
+            if int(info.get("created_ns") or 0) < int(min_created):
+                return False, "too-old"
+        except (TypeError, ValueError):
+            return False, "created-unknown"
+    if policy.get("require_automation"):
+        cmdline = str(info.get("cmdline") or "")
+        if "/automation" not in cmdline.casefold():
+            return False, "no-automation-flag"
+    return True, "owned"
+
+
+def _toolhelp_processes() -> list:
+    """Снимок процессов через Toolhelp32: [{pid, parent, image}]. Без psutil/wmic."""
+    import ctypes
+
+    TH32CS_SNAPPROCESS = 0x00000002
+    results = []
+    try:
+        k32 = ctypes.windll.kernel32
+
+        class PROCESSENTRY32W(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", ctypes.c_ulong),
+                ("cntUsage", ctypes.c_ulong),
+                ("th32ProcessID", ctypes.c_ulong),
+                ("th32DefaultHeapID", ctypes.c_ulong),
+                ("th32ModuleID", ctypes.c_ulong),
+                ("cntThreads", ctypes.c_ulong),
+                ("th32ParentProcessID", ctypes.c_ulong),
+                ("pcPriClassBase", ctypes.c_long),
+                ("dwFlags", ctypes.c_ulong),
+                ("szExeFile", ctypes.c_wchar * 260),
+            ]
+
+        snap = k32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+        if int(snap) == -1:
+            return results
+        try:
+            entry = PROCESSENTRY32W()
+            entry.dwSize = ctypes.sizeof(PROCESSENTRY32W)
+            ok = k32.Process32FirstW(snap, ctypes.byref(entry))
+            while ok:
+                try:
+                    results.append({
+                        "pid": int(entry.th32ProcessID),
+                        "parent": int(entry.th32ParentProcessID),
+                        "image": str(entry.szExeFile or "").casefold(),
+                    })
+                except Exception:
+                    pass
+                ok = k32.Process32NextW(snap, ctypes.byref(entry))
+        finally:
+            try:
+                k32.CloseHandle(snap)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return results
+
+
+def _process_created_ns(pid: int) -> int | None:
+    """Время создания процесса в нс (None если недоступно)."""
+    import ctypes
+
+    try:
+        k32 = ctypes.windll.kernel32
+
+        class FILETIME(ctypes.Structure):
+            _fields_ = [("dwLowDateTime", ctypes.c_ulong),
+                        ("dwHighDateTime", ctypes.c_ulong)]
+
+        handle = k32.OpenProcess(0x1000, False, int(pid))
+        if not handle:
+            return None
+        try:
+            created = FILETIME()
+            ignore1 = FILETIME()
+            ignore2 = FILETIME()
+            ignore3 = FILETIME()
+            if not k32.GetProcessTimes(handle, ctypes.byref(created),
+                                       ctypes.byref(ignore1),
+                                       ctypes.byref(ignore2),
+                                       ctypes.byref(ignore3)):
+                return None
+            return (int(created.dwHighDateTime) << 32) + int(created.dwLowDateTime)
+        finally:
+            try:
+                k32.CloseHandle(handle)
+            except Exception:
+                pass
+    except Exception:
+        return None
+    return None
+
+
+def _process_cmdline(pid: int) -> str | None:
+    """Командная строка процесса через NtQueryInformationProcess (None если недоступно)."""
+    import ctypes
+
+    try:
+        ntdll = ctypes.windll.ntdll
+        k32 = ctypes.windll.kernel32
+        PROCESS_QUERY_LIMITED = 0x1000
+        ProcessCommandLineInformation = 60
+
+        class UNICODE_STRING(ctypes.Structure):
+            _fields_ = [("Length", ctypes.c_ushort),
+                        ("MaximumLength", ctypes.c_ushort),
+                        ("Buffer", ctypes.c_void_p)]
+
+        handle = k32.OpenProcess(PROCESS_QUERY_LIMITED, False, int(pid))
+        if not handle:
+            return None
+        try:
+            buf_len = 32 * 1024
+            buf = ctypes.create_string_buffer(buf_len)
+            ret_len = ctypes.c_ulong()
+            status = ntdll.NtQueryInformationProcess(
+                handle, ProcessCommandLineInformation,
+                buf, buf_len, ctypes.byref(ret_len),
+            )
+            if status != 0:
+                return None
+            ustr = UNICODE_STRING.from_buffer(buf)
+            if ustr.Length <= 0:
+                return ""
+            str_offset = ctypes.sizeof(UNICODE_STRING)
+            raw = buf[str_offset:str_offset + ustr.Length]
+            return raw.decode("utf-16le", errors="replace")
+        finally:
+            try:
+                k32.CloseHandle(handle)
+            except Exception:
+                pass
+    except Exception:
+        return None
+    return None
+
+
+def _live_cad_info(pid: int) -> dict:
+    """Собрать проверяемые данные живого процесса (best effort)."""
+    import ctypes
+
+    info: dict = {"pid": pid, "image": "", "parent": 0,
+                  "created_ns": 0, "cmdline": ""}
+    try:
+        k32 = ctypes.windll.kernel32
+        handle = k32.OpenProcess(0x1000, False, int(pid))
+        if handle:
+            try:
+                buf = ctypes.create_unicode_buffer(260)
+                size = ctypes.c_ulong(260)
+                if k32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+                    info["image"] = os.path.basename(buf.value or "").casefold()
+            finally:
+                try:
+                    k32.CloseHandle(handle)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    try:
+        for row in _toolhelp_processes():
+            if row.get("pid") == int(pid):
+                info["parent"] = row.get("parent", 0)
+                break
+    except Exception:
+        pass
+    created = _process_created_ns(pid)
+    info["created_ns"] = created or 0
+    cmdline = _process_cmdline(pid)
+    info["cmdline"] = cmdline or ""
+    return info
+
+
+def _verify_owned_acad(pid: int, policy: dict | None = None) -> tuple[bool, str]:
+    """Живая проверка владения перед kill. Никогда не убивает сама."""
+    merged = {"image_allow": {"acad.exe"}, "require_automation": True}
+    if policy:
+        merged.update(policy)
+    try:
+        return _check_cad_ownership(_live_cad_info(pid), merged)
+    except Exception as err:
+        return False, f"verify-error:{err}"
+
+
+def _kill_owned_acad(pid: int, policy: dict | None = None) -> bool:
+    """Убить PID только после успешной проверки владения. Возвращает факт."""
+    try:
+        owned, _ = _verify_owned_acad(pid, policy)
+        if not owned:
+            return False
+        proc = subprocess.run(
+            ["taskkill", "/PID", str(int(pid)), "/F"],
+            capture_output=True,
+            timeout=15,
+            **hidden_process_kwargs(),
+        )
+        return proc.returncode == 0
+    except Exception:
+        return False
+
+
+def _descendant_acad_pids(root_pid: int) -> list:
+    """Acad-PID, чьё дерево родителей ведёт к root_pid (для oneshot-сирот)."""
+    try:
+        table = {row["pid"]: row for row in _toolhelp_processes()}
+    except Exception:
+        return []
+    found = []
+    for pid, row in table.items():
+        if str(row.get("image") or "") != "acad.exe":
+            continue
+        seen = set()
+        cursor = row.get("parent", 0)
+        while cursor and cursor not in seen:
+            if cursor == int(root_pid):
+                found.append(pid)
+                break
+            seen.add(cursor)
+            parent_row = table.get(cursor)
+            cursor = parent_row.get("parent", 0) if parent_row else 0
+    return found
 
 
 def dwg_convert_via_daemon(
@@ -704,6 +1109,7 @@ def dwg_convert_via_daemon(
     job_id = hashlib.sha1(os.urandom(16)).hexdigest()
     job_file = job_dir / f"{job_id}.job.json"
     done_file = job_dir / f"{job_id}.done.json"
+    state_file = job_dir / f"{job_id}.state.json"
     job_file.write_text(
         json.dumps(
             {
@@ -716,13 +1122,46 @@ def dwg_convert_via_daemon(
         ),
         encoding="utf-8",
     )
+    _dwg_timing("JOB_SUBMIT", job=job_id, path=str(input_path))
+    # Dispatcher polls JobDir every second and writes state.json synchronously
+    # on pickup. If nothing appears quickly, the daemon is deaf: kill it and
+    # fall back immediately instead of idling until the job timeout.
+    accept_deadline = time.time() + DWG_DAEMON_SUBMIT_TIMEOUT_SECONDS
+    accepted = False
+    while time.time() < accept_deadline:
+        if state_file.exists() or done_file.exists():
+            accepted = True
+            break
+        if not _dwg_daemon_alive():
+            break
+        time.sleep(0.25)
+    if accepted:
+        _dwg_timing("JOB_ACCEPTED", job=job_id, path=str(input_path))
+    else:
+        _dwg_timing("JOB_NOT_ACCEPTED", job=job_id, path=str(input_path))
+        kill_dwg_daemon("job-not-accepted")
+        raise RuntimeError(
+            f"dwg-daemon did not accept job within {DWG_DAEMON_SUBMIT_TIMEOUT_SECONDS}s"
+        )
     deadline = time.time() + timeout_seconds
     try:
         while time.time() < deadline:
+            if state_file.exists():
+                try:
+                    st_data = json.loads(state_file.read_text(encoding="utf-8"))
+                    dwg_job_set_state(str(input_path), st_data)
+                except Exception:
+                    pass
             if done_file.exists():
                 payload = json.loads(done_file.read_text(encoding="utf-8"))
                 if payload.get("ok"):
                     result = payload.get("result") or {}
+                    _dwg_timing(
+                        "JOB_DONE",
+                        job=job_id,
+                        path=str(input_path),
+                        pages=result.get("pageCount", 0),
+                    )
                     stdout_line = json.dumps(
                         {
                             "ok": True,
@@ -740,7 +1179,7 @@ def dwg_convert_via_daemon(
                 raise RuntimeError("CAD daemon died mid-job")
             time.sleep(0.25)
     finally:
-        for temp_file in (job_file, done_file):
+        for temp_file in (job_file, done_file, state_file):
             try:
                 temp_file.unlink(missing_ok=True)
             except OSError:
@@ -758,31 +1197,64 @@ def dwg_convert_oneshot(
     timeout_seconds: int,
 ) -> subprocess.CompletedProcess:
     """Старый разовый запуск: новый CAD на каждый файл (fallback демона)."""
-    return subprocess.run(
-        [
-            "powershell",
-            "-STA",
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-            str(script_to_run),
-            "-InputPath",
-            str(input_path),
-            "-OutputPath",
-            str(output_path),
-            "-FallbackCachePath",
-            str(fallback_path),
-            "-PythonExe",
-            str(sys.executable),
-        ],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=timeout_seconds,
-        **hidden_process_kwargs(),
-    )
+    try:
+        before_acads = set()
+        try:
+            for row in _toolhelp_processes():
+                if str(row.get("image") or "") == "acad.exe":
+                    before_acads.add(int(row.get("pid") or 0))
+        except Exception:
+            before_acads = set()
+        return subprocess.run(
+            [
+                "powershell",
+                "-STA",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(script_to_run),
+                "-InputPath",
+                str(input_path),
+                "-OutputPath",
+                str(output_path),
+                "-FallbackCachePath",
+                str(fallback_path),
+                "-PythonExe",
+                str(sys.executable),
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout_seconds,
+            **hidden_process_kwargs(),
+        )
+    except BaseException:
+        # Powershell убит/упал: его finally не отработал, CAD-сирота остался.
+        # Добиваем только НОВЫЕ automation-сессии (не трогаем интерактив).
+        try:
+            after = {}
+            try:
+                for row in _toolhelp_processes():
+                    if str(row.get("image") or "") == "acad.exe":
+                        after[int(row.get("pid") or 0)] = row
+            except Exception:
+                after = {}
+            for pid in after:
+                if pid in before_acads or pid <= 0:
+                    continue
+                try:
+                    _kill_owned_acad(pid, {
+                        "image_allow": {"acad.exe"},
+                        "require_automation": True,
+                        "protected_pids": set(before_acads),
+                    })
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        raise
 
 
 def dwg_convert_process(
@@ -802,14 +1274,21 @@ def dwg_convert_process(
         )
     except (TimeoutError, _DwgFileError):
         raise
-    except Exception as err:
-        return dwg_convert_oneshot(
+    except Exception:
+        # Демон ещё жив — второй CAD плодить запрещено, отдаём ошибку.
+        if _dwg_daemon_alive():
+            raise
+        _dwg_timing("FALLBACK_BEGIN", path=str(path))
+        process = dwg_convert_oneshot(
             script_to_run=script_to_run,
             input_path=path,
             output_path=paired_pdf,
             fallback_path=fallback_pdf,
             timeout_seconds=DWG_RENDER_TIMEOUT_SECONDS,
         )
+        if process.returncode == 0:
+            _dwg_timing("FALLBACK_PDF", path=str(path))
+        return process
 
 
 def dwg_to_model_pdf(path: Path) -> tuple[Path, bool]:
@@ -823,90 +1302,105 @@ def dwg_to_model_pdf(path: Path) -> tuple[Path, bool]:
     if not path.is_file() or path.suffix.casefold() != ".dwg":
         raise ValueError(f"Это не DWG-файл: {path}")
 
-    # 1. Проверяем парный PDF рядом с исходником DWG
-    paired_pdf = path.with_suffix(".pdf")
-    if paired_pdf.exists() and paired_pdf.is_file() and paired_pdf.stat().st_size > 1024:
-        try:
-            if paired_pdf.stat().st_mtime_ns >= path.stat().st_mtime_ns:
-                return paired_pdf, True
-        except OSError:
-            pass
+    # P0: второй render того же нормализованного пути запрещён, пока жив первый.
+    _job_key = make_dwg_job_key(path)
+    _job_ok, _ = dwg_job_gate(path)
+    if not _job_ok:
+        st = dwg_job_get_state(_job_key)
+        if st:
+            done_l = st.get("completedLayouts", 0)
+            tot_l = st.get("totalLayouts", 0)
+            raise RuntimeError(f"DWG уже обрабатывается (job {st.get('jobId')}, листов: {done_l}/{tot_l}): {path}")
+        raise RuntimeError(f"DWG уже обрабатывается: {path}")
+    try:
+        # 1. Проверяем парный PDF рядом с исходником DWG
+        paired_pdf = path.with_suffix(".pdf")
+        if paired_pdf.exists() and paired_pdf.is_file() and paired_pdf.stat().st_size > 1024:
+            try:
+                if paired_pdf.stat().st_mtime_ns >= path.stat().st_mtime_ns:
+                    return paired_pdf, True
+            except OSError:
+                pass
 
-    # 2. Проверяем резервный кэш
-    key = file_cache_key(path, "dwg-smart-cad-v2")
-    target_dir = DWG_CACHE_DIR / key
-    target_dir.mkdir(parents=True, exist_ok=True)
-    fallback_pdf = target_dir / f"{path.stem}.pdf"
-    manifest_path = target_dir / "manifest.json"
-    if fallback_pdf.exists() and fallback_pdf.stat().st_size > 1024 and manifest_path.exists():
-        try:
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            if (
-                manifest.get("sourcePath") == str(path)
-                and manifest.get("cacheKey") == key
-                and manifest.get("sourceMtimeNs") == path.stat().st_mtime_ns
-                and manifest.get("sourceSize") == path.stat().st_size
-            ):
-                return fallback_pdf, True
-        except (OSError, json.JSONDecodeError):
-            pass
+        # 2. Проверяем резервный кэш
+        key = file_cache_key(path, "dwg-smart-cad-v2")
+        target_dir = DWG_CACHE_DIR / key
+        target_dir.mkdir(parents=True, exist_ok=True)
+        fallback_pdf = target_dir / f"{path.stem}.pdf"
+        manifest_path = target_dir / "manifest.json"
+        if fallback_pdf.exists() and fallback_pdf.stat().st_size > 1024 and manifest_path.exists():
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                if (
+                    manifest.get("sourcePath") == str(path)
+                    and manifest.get("cacheKey") == key
+                    and manifest.get("sourceMtimeNs") == path.stat().st_mtime_ns
+                    and manifest.get("sourceSize") == path.stat().st_size
+                ):
+                    return fallback_pdf, True
+            except (OSError, json.JSONDecodeError):
+                pass
 
-    script_to_run = DWG_SMART_RENDER_SCRIPT if DWG_SMART_RENDER_SCRIPT.exists() else DWG_RENDER_SCRIPT
-    process = dwg_convert_process(
-        path=path,
-        paired_pdf=paired_pdf,
-        fallback_pdf=fallback_pdf,
-        script_to_run=script_to_run,
-    )
-    if process.returncode != 0:
-        message = process.stderr.strip() or process.stdout.strip() or "CAD-система (AutoCAD) не смогла создать PDF для чертежа"
-        raise RuntimeError(message)
-
-    final_pdf = None
-    if paired_pdf.exists() and paired_pdf.stat().st_size > 1024:
-        final_pdf = paired_pdf
-    elif fallback_pdf.exists() and fallback_pdf.stat().st_size > 1024:
-        final_pdf = fallback_pdf
-    else:
-        for line in reversed((process.stdout or "").splitlines()):
-            line = line.strip()
-            if line.startswith("{") and line.endswith("}"):
-                try:
-                    data = json.loads(line)
-                    cand = Path(data.get("finalPath", ""))
-                    if cand.exists() and cand.stat().st_size > 1024:
-                        final_pdf = cand
-                        break
-                except Exception:
-                    pass
-
-    if not final_pdf or not final_pdf.exists() or final_pdf.stat().st_size <= 1024:
-        raise RuntimeError("CAD-система (AutoCAD) не создала PDF-файл для чертежа")
-
-    if final_pdf == fallback_pdf:
-        manifest_path.write_text(
-            json.dumps(
-                {
-                    "sourcePath": str(path),
-                    "sourceName": path.name,
-                    "sourceMtimeNs": path.stat().st_mtime_ns,
-                    "sourceSize": path.stat().st_size,
-                    "cacheKey": key,
-                    "pdfPath": str(fallback_pdf),
-                    "mode": "smart-layouts-fallback-cache",
-                    "renderedAt": datetime.now().isoformat(timespec="seconds"),
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
-            encoding="utf-8",
+        script_to_run = DWG_SMART_RENDER_SCRIPT if DWG_SMART_RENDER_SCRIPT.exists() else DWG_RENDER_SCRIPT
+        process = dwg_convert_process(
+            path=path,
+            paired_pdf=paired_pdf,
+            fallback_pdf=fallback_pdf,
+            script_to_run=script_to_run,
         )
-    return final_pdf, False
+        if process.returncode != 0:
+            message = process.stderr.strip() or process.stdout.strip() or "CAD-система (AutoCAD) не смогла создать PDF для чертежа"
+            raise RuntimeError(message)
+
+        final_pdf = None
+        if paired_pdf.exists() and paired_pdf.stat().st_size > 1024:
+            final_pdf = paired_pdf
+        elif fallback_pdf.exists() and fallback_pdf.stat().st_size > 1024:
+            final_pdf = fallback_pdf
+        else:
+            for line in reversed((process.stdout or "").splitlines()):
+                line = line.strip()
+                if line.startswith("{") and line.endswith("}"):
+                    try:
+                        data = json.loads(line)
+                        cand = Path(data.get("finalPath", ""))
+                        if cand.exists() and cand.stat().st_size > 1024:
+                            final_pdf = cand
+                            break
+                    except Exception:
+                        pass
+
+        if not final_pdf or not final_pdf.exists() or final_pdf.stat().st_size <= 1024:
+            raise RuntimeError("CAD-система (AutoCAD) не создала PDF-файл для чертежа")
+
+        if final_pdf == fallback_pdf:
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "sourcePath": str(path),
+                        "sourceName": path.name,
+                        "sourceMtimeNs": path.stat().st_mtime_ns,
+                        "sourceSize": path.stat().st_size,
+                        "cacheKey": key,
+                        "pdfPath": str(fallback_pdf),
+                        "mode": "smart-layouts-fallback-cache",
+                        "renderedAt": datetime.now().isoformat(timespec="seconds"),
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+        return final_pdf, False
+    finally:
+        dwg_job_release(_job_key)
 
 
 def render_dwg_model(path: Path, dpi: int = DEFAULT_PDF_DPI) -> dict:
     pdf_path, convert_cache_hit = dwg_to_model_pdf(path)
+    _dwg_timing("PNG_BEGIN", path=str(path))
     document = render_pdf(pdf_path, dpi=dpi, page_timeout_seconds=DWG_MODEL_PAGE_TIMEOUT_SECONDS)
+    _dwg_timing("PNG_END", path=str(path), pages=document.get("pages", 0))
     document["name"] = path.name
     document["sourcePath"] = str(path)
     document["sourceName"] = path.name

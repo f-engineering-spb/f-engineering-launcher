@@ -78,6 +78,8 @@ function Convert-DwgJob($job, [string]$jobId = "") {
     }
   }
   & $writeState
+  $jobSw = [System.Diagnostics.Stopwatch]::StartNew()
+  Write-DaemonLog ("MARK JOB_START job={0} pid={1} in='{2}' out='{3}' elapsed_ms=0" -f $jobId, $PID, $InputPath, $OutputPath)
 
   # Native export: single paper layout (Layout1, Current Layout) via AutoCAD
   # Core Console _.-EXPORT _PDF. Dispatcher opens no DWG and starts no CAD.
@@ -133,6 +135,7 @@ function Convert-DwgJob($job, [string]$jobId = "") {
       progId = [string]$exportResult.progId
     }
   } finally {
+    Write-DaemonLog ("MARK JOB_END job={0} pid={1} in='{2}' out='{3}' elapsed_ms={4} status={5}" -f $jobId, $PID, $InputPath, $OutputPath, [int]$jobSw.ElapsedMilliseconds, $stateObj.status)
     if ($stateFile -and (Test-Path -LiteralPath $stateFile)) {
       try { Remove-Item -LiteralPath $stateFile -Force -ErrorAction SilentlyContinue } catch {}
     }
