@@ -2971,7 +2971,13 @@ def main() -> None:
     MANIFESTS_DIR.mkdir(exist_ok=True)
     (RUNTIME_DIR / "logs").mkdir(exist_ok=True)
 
-    server = ThreadingHTTPServer((args.host, args.port), LauncherHandler)
+    try:
+        server = ThreadingHTTPServer((args.host, args.port), LauncherHandler)
+    except OSError as err:
+        if getattr(err, "winerror", None) == 10048 or getattr(err, "errno", None) == 10048 or "10048" in str(err):
+            print(f"ERROR: Port {args.port} is already in use by another process: {err}", file=sys.stderr, flush=True)
+            sys.exit(48)
+        raise
     print(f"F-Engineering Launcher v3: http://{args.host}:{args.port}/", flush=True)
     server.serve_forever()
 

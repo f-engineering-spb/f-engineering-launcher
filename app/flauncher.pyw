@@ -3,8 +3,12 @@
 Без консоли: проверяет и поднимает backend-сервер в фоне (порты 8780..8789)
 и открывает интерфейс в отдельном окне приложения через pywebview.
 При отсутствии pywebview или ошибке вебвью открывает окно в Edge/Chrome.
+Гарантированное завершение: использует Windows Job Object (KILL_ON_JOB_CLOSE)
+и явные хуки закрытия окна, чтобы сервер никогда не оставался зомби в памяти.
 """
+import atexit
 import ctypes
+from ctypes import wintypes
 import os
 import socket
 import subprocess
@@ -18,6 +22,127 @@ ICON = os.path.join(REPO_ROOT, "app", "frontend", "assets", "flauncher.ico")
 TITLE = "F-Engineering Launcher"
 GUI_MUTEX_PORT = 8799
 LOGS_DIR = os.path.join(REPO_ROOT, "runtime", "logs")
+
+# --- Windows Job Object (Process Lifecycle Management) ---
+JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
+JobObjectExtendedLimitInformation = 9
+
+
+class IO_COUNTERS(ctypes.Structure):
+    _fields_ = [
+        ("ReadOperationCount", ctypes.c_uint64),
+        ("WriteOperationCount", ctypes.c_uint64),
+        ("OtherOperationCount", ctypes.c_uint64),
+        ("ReadTransferCount", ctypes.c_uint64),
+        ("WriteTransferCount", ctypes.c_uint64),
+        ("OtherTransferCount", ctypes.c_uint64),
+    ]
+
+
+class JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
+    _fields_ = [
+        ("PerProcessUserTimeLimit", ctypes.c_int64),
+        ("PerJobUserTimeLimit", ctypes.c_int64),
+        ("LimitFlags", wintypes.DWORD),
+        ("MinimumWorkingSetSize", ctypes.c_size_t),
+        ("MaximumWorkingSetSize", ctypes.c_size_t),
+        ("ActiveProcessLimit", wintypes.DWORD),
+        ("Affinity", ctypes.c_size_t),
+        ("PriorityClass", wintypes.DWORD),
+        ("SchedulingClass", wintypes.DWORD),
+    ]
+
+
+class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
+    _fields_ = [
+        ("BasicLimitInformation", JOBOBJECT_BASIC_LIMIT_INFORMATION),
+        ("IoInfo", IO_COUNTERS),
+        ("ProcessMemoryLimit", ctypes.c_size_t),
+        ("JobMemoryLimit", ctypes.c_size_t),
+        ("PeakProcessMemoryLimit", ctypes.c_size_t),
+        ("PeakJobMemoryLimit", ctypes.c_size_t),
+    ]
+
+
+_JOB_HANDLE = None
+
+
+def get_or_create_kill_on_close_job():
+    global _JOB_HANDLE
+    if _JOB_HANDLE is not None:
+        return _JOB_HANDLE
+    if os.name != "nt":
+        return None
+    try:
+        k32 = ctypes.windll.kernel32
+        job = k32.CreateJobObjectW(None, None)
+        if not job:
+            log("CreateJobObjectW returned NULL")
+            return None
+        info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        success = k32.SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            ctypes.byref(info),
+            ctypes.sizeof(info),
+        )
+        if not success:
+            err = k32.GetLastError()
+            log(f"SetInformationJobObject failed with error {err}")
+            k32.CloseHandle(job)
+            return None
+        _JOB_HANDLE = job
+        log("Successfully created Windows Job Object with KILL_ON_JOB_CLOSE")
+        return _JOB_HANDLE
+    except Exception as e:
+        log(f"Failed to create Job Object: {e}")
+        return None
+
+
+def assign_process_to_job(proc) -> bool:
+    if not proc or os.name != "nt":
+        return False
+    job = get_or_create_kill_on_close_job()
+    if not job:
+        return False
+    try:
+        k32 = ctypes.windll.kernel32
+        proc_handle = getattr(proc, "_handle", None)
+        if proc_handle:
+            ok = bool(k32.AssignProcessToJobObject(job, int(proc_handle)))
+            log(f"Assigned process pid {proc.pid} to Job Object: {ok}")
+            return ok
+        elif hasattr(proc, "pid"):
+            PROCESS_SET_QUOTA = 0x0100
+            PROCESS_TERMINATE = 0x0001
+            h = k32.OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, False, proc.pid)
+            if h:
+                ok = bool(k32.AssignProcessToJobObject(job, h))
+                k32.CloseHandle(h)
+                log(f"Assigned process pid {proc.pid} to Job Object via OpenProcess: {ok}")
+                return ok
+    except Exception as e:
+        log(f"AssignProcessToJobObject error: {e}")
+    return False
+
+
+def shutdown_server(proc) -> None:
+    if not proc:
+        return
+    try:
+        if proc.poll() is None:
+            log(f"Shutting down server pid {proc.pid}...")
+            proc.terminate()
+            try:
+                proc.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                log(f"Force-killing server pid {proc.pid} after timeout...")
+                proc.kill()
+                proc.wait(timeout=1.0)
+            log(f"Server pid {proc.pid} stopped successfully")
+    except Exception as e:
+        log(f"Error during shutdown_server: {e}")
 
 
 def log(msg: str) -> None:
@@ -50,8 +175,7 @@ def is_port_free(port: int) -> bool:
 
 def reap_stale_server(port: int) -> None:
     # Порт занят, но сервер на нём не отвечает: гасим зависший процесс,
-    # если это точно наш backend. Чужие процессы не трогаем.
-    # Лучше стараться, чем бросать: при неудаче просто идём дальше.
+    # если это точно процесс лаунчера. Чужие процессы не трогаем.
     try:
         out = subprocess.run(
             ["netstat", "-ano", "-p", "TCP"],
@@ -73,36 +197,45 @@ def reap_stale_server(port: int) -> None:
                  "(Get-CimInstance Win32_Process -Filter \"ProcessId=%s\").CommandLine" % pid],
                 capture_output=True, text=True, timeout=15,
             )
-            if BACKEND in (ps.stdout or ""):
+            cmd = (ps.stdout or "").lower()
+            if "server.py" in cmd and ("launcher" in cmd or "codex" in cmd or "app" in cmd):
                 subprocess.run(["taskkill", "/F", "/PID", pid],
                                capture_output=True, timeout=15)
-                log("Reaped stale server pid %s on port %d" % (pid, port))
+                log(f"Reaped stale launcher server pid {pid} on port {port}")
         except Exception:
             pass
 
 
-def find_or_start_server() -> int:
-    # 1. Проверяем, может сервер уже работает на одном из портов 8780..8789
-    for p in range(8780, 8790):
-        if is_server_healthy(p):
-            log(f"Found already healthy server on port {p}")
-            return p
+def find_or_start_server() -> tuple[int, subprocess.Popen | None]:
+    # 1. Проверяем, может сервер уже работает на основном порту 8780
+    if is_server_healthy(8780):
+        log("Found healthy server on primary port 8780")
+        return 8780, None
 
-    # 2. Порт занят, но никто не отвечает: добиваем зависший backend
-    # и только потом ищем свободный порт.
-    for p in range(8780, 8790):
-        if not is_server_healthy(p) and not is_port_free(p):
-            reap_stale_server(p)
+    # Если порт 8780 занят, но НЕ здоров — сносим зомби-процесс
+    if not is_port_free(8780):
+        log("Port 8780 is occupied but unhealthy; reaping stale server...")
+        reap_stale_server(8780)
+        time.sleep(0.5)
 
-    # 3. Ищем первый свободный порт
+    # 2. Если 8780 свободен, выбираем его; иначе проверяем диапазон 8781..8789
     target_port = None
-    for p in range(8780, 8790):
-        if is_port_free(p):
-            target_port = p
-            break
+    if is_port_free(8780):
+        target_port = 8780
+    else:
+        for p in range(8781, 8790):
+            if is_server_healthy(p):
+                log(f"Found already healthy server on port {p}")
+                return p, None
+            if not is_port_free(p):
+                reap_stale_server(p)
+                time.sleep(0.3)
+            if is_port_free(p):
+                target_port = p
+                break
 
     if target_port is None:
-        target_port = 8781
+        target_port = 8780
 
     log(f"Starting backend on port {target_port}")
     creationflags = 0
@@ -111,7 +244,7 @@ def find_or_start_server() -> int:
 
     # Запускаем server.py
     python_exe = sys.executable
-    subprocess.Popen(
+    server_proc = subprocess.Popen(
         [python_exe, BACKEND, "--port", str(target_port)],
         cwd=REPO_ROOT,
         stdout=subprocess.DEVNULL,
@@ -119,15 +252,18 @@ def find_or_start_server() -> int:
         creationflags=creationflags,
     )
 
+    # Привязываем дочерний процесс сервера к Windows Job Object с авто-завершением
+    assign_process_to_job(server_proc)
+
     deadline = time.time() + 20
     while time.time() < deadline:
         if is_server_healthy(target_port):
-            log(f"Server on port {target_port} became healthy")
-            return target_port
+            log(f"Server on port {target_port} became healthy (pid {server_proc.pid})")
+            return target_port, server_proc
         time.sleep(0.3)
 
     log(f"Warning: server on port {target_port} health check timed out, attempting to use it anyway")
-    return target_port
+    return target_port, server_proc
 
 
 def focus_existing_window() -> bool:
@@ -169,7 +305,10 @@ def main():
             log("Focused existing window, exiting duplicate process")
             return
 
-    port = find_or_start_server()
+    port, server_proc = find_or_start_server()
+    if server_proc:
+        atexit.register(lambda: shutdown_server(server_proc))
+
     url = f"http://127.0.0.1:{port}/"
 
     opened_webview = False
@@ -187,8 +326,20 @@ def main():
             window.events.loaded += _maximize_on_load
         except Exception as e:
             log(f"Could not bind maximize on load: {e}")
+
+        # Гарантированное завершение сервера при закрытии окна
+        try:
+            def _on_window_closed(*args, **kwargs):
+                log("Window closed event received, stopping server...")
+                shutdown_server(server_proc)
+            window.events.closed += _on_window_closed
+        except Exception as e:
+            log(f"Could not bind on_closed event: {e}")
+
         opened_webview = True
         webview.start(icon=ICON if os.path.exists(ICON) else None)
+        # После выхода из webview.start() (окно закрыто)
+        shutdown_server(server_proc)
     except Exception as e:
         log(f"pywebview failed: {e}, falling back to browser window")
         if not opened_webview:
