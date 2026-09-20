@@ -269,3 +269,40 @@ git switch dvg-main
 - **Запрещённая папка:** `C:\Users\a9379\Documents\Codex\FEngineering_Launcher_v3_OLD_DO_NOT_USE`
 - **Хелпер запуска:** В корне репозитория создан скрипт `RUN_AGENT.cmd` для удобного запуска CLI-агента со считыванием задачи из `prompt.txt`.
 
+### 13. DWG→PDF только штатными средствами AutoCAD (абсолютный запрет)
+
+Проверено на практике 2026-09-20: любой нештатный путь приводит к висящим
+сессиям, мёртвым job и суткам потерянной работы. Поэтому — ни при каких
+обстоятельствах, без исключений:
+
+ЗАПРЕЩЕНО навсегда:
+- `PlotToFile` / `PlotToDevice` в любом виде, включая «fallback на всякий случай»
+  и ветки вида «if export fails then PlotToFile»;
+- ручная настройка печати: `ConfigName`, `CanonicalMediaName`, `PlotType`,
+  `UseStandardScale`, `StandardScale`, подбор media/принтера/масштаба кодом;
+- COM-открытие DWG (`Documents.Open`, `Connect-CadApp`, guard-open,
+  ownership-attach ради конвертации) — ни в daemon, ни в oneshot, ни в хелпере;
+- команды в живую GUI-сессию AutoCAD через COM (`SendCommand`, `PostCommand`)
+  для построения PDF — сессия виснет на промптах и модальных диалогах;
+- самописные CAD-вьюверы и сторонние DWG→PDF конвертеры в production-пути;
+- восстановление удалённых файлов `render_dwg_oneshot_v2.ps1`, `temp_test_bom.ps1`
+  и любых их копий/переименований.
+
+РАЗРЕШЁН единственный production-маршрут (один исполнитель на один DWG):
+- открыть DWG, активировать `Layout1`, выполнить штатную команду AutoCAD
+  `_.-EXPORT` → `_PDF` → текущий лист, передать путь PDF, дождаться завершения,
+  проверить файл (`%PDF-`, свежесть, 1 страница, полный лист);
+- реализация — только через общий хелпер
+  `scripts/Invoke-NativeDwgPdfExport.ps1` (accoreconsole + сгенерированный
+  ASCII-скрипт, ожидание по файловой системе, `_QUIT _N` — файл DWG никогда
+  не сохраняется; хелпер не открывает DWG и не стартует CAD);
+- ровно один `accoreconsole.exe` на job; daemon — только диспетчер
+  (job/state/done, ready/lifecycle), CAD-сессий у production нет;
+- production-вызовы — только `scripts/render_dwg_daemon.ps1` (daemon-first)
+  и `scripts/render_dwg_smart.ps1` (тонкий oneshot без COM);
+- тестировать только на byte-copy (оригинал пользователя не трогать).
+
+Критерий готовности — не HTTP 200 и не cache hit, а свежий PDF парой рядом
+с DWG с полным листом (рамка, штамп, ничего не обрезано) плюс визуальная
+проверка PNG.
+
