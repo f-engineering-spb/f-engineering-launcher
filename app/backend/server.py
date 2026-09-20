@@ -1543,8 +1543,21 @@ def launch_native_file(path: Path) -> str:
     cfg = load_native_apps_config()
     use_native = bool(cfg.get("useNativeApps", True))
 
+    if use_native and suffix in {".dwg", ".dxf"}:
+        dwg_exe = str(
+            cfg.get(suffix, "")
+            or cfg.get(".dwg", "")
+            or cfg.get(".dxf", "")
+            or cfg.get("settingDwgExe", "")
+        ).strip()
+        if not dwg_exe or not Path(dwg_exe).exists():
+            raise ValueError("Не найден AutoCAD, укажите путь в настройках")
+
     if use_native:
-        custom_exe = str(cfg.get(suffix, "")).strip()
+        custom_exe = str(
+            cfg.get(suffix, "")
+            or (dwg_exe if suffix in {".dwg", ".dxf"} else "")
+        ).strip()
         if custom_exe and Path(custom_exe).exists():
             try:
                 exe_path = str(Path(custom_exe).resolve())
