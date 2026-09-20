@@ -53,7 +53,7 @@ Decision:
 Reason:
 
 - DWG viewers differ by workstation;
-- AutoCAD/ZWCAD/DWG TrueView are better native tools for actual DWG inspection;
+- AutoCAD/DWG TrueView are better native tools for actual DWG inspection;
 - Launcher's job is fast navigation, preview, and selection.
 
 ## 2026-08-12 - DWG/PDF matching must be semantic, not only numeric

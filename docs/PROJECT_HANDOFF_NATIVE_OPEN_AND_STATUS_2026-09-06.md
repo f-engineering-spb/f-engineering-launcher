@@ -12,7 +12,7 @@
 Launcher v3 — специализированный визуальный лаунчер для проектировщиков и инженеров. Его задача:
 1. **Быстрая загрузка и обзор** больших древовидных структур файлов проектной документации (объектов строительства).
 2. **Мгновенный визуальный предпросмотр** чертежей, сканов, таблиц и документов (карточки / миниатюры $\rightarrow$ большой просмотрщик) без необходимости запускать тяжёлые приложения для сотен файлов.
-3. **Надежное открытие исходного файла в нативной программе** (ZWCAD, Excel, Word, ONLYOFFICE, Paint, VLC и др.) в один клик прямо из дерева или из панели просмотра.
+3. **Надежное открытие исходного файла в нативной программе** (AutoCAD, Excel, Word, ONLYOFFICE, Paint, VLC и др.) в один клик прямо из дерева или из панели просмотра.
 4. **Безопасная работа с корпоративными сетевыми дисками** (Google Drive `H:\`, сетевые папки) без зависаний, с кэшированием и фильтрацией временных файлов (`~$*`, `.~*`).
 
 ---
@@ -34,10 +34,7 @@ Launcher v3 — специализированный визуальный лау
   - `scripts/convert_excel_to_pdf.ps1` — конвертер Excel в PDF через COM.
   - `scripts/convert_word_to_pdf.ps1` — конвертер Word в PDF через COM.
   - `scripts/convert_xls_to_xlsx.ps1` — конвертер устаревших XLS в XLSX.
-  - `scripts/render_dwg_model_space.ps1` — рендерер пространства модели DWG.
-  - `scripts/open_dwg_review_copy.ps1` — COM-скрипт для ZWCAD.
-  - `scripts/open_excel_native.ps1` — COM-скрипт для Excel.
-  - `scripts/open_word_native.ps1` — COM-скрипт для Word.
+  - `scripts/render_dwg_model_space.ps1` — рендерер пространства модели DWG через AutoCAD COM.
 - **Локальный runtime (`runtime/`) — не коммитится:**
   - `runtime/manifests/*.json` — сохранённые деревья загруженных объектов.
   - `runtime/cache/` — кэшированные превью: `pdf/`, `excel/html/`, `word/`, `dwg/`.
@@ -47,7 +44,7 @@ Launcher v3 — специализированный визуальный лау
   - `C:\Users\a9379\Downloads\` — локальная папка загрузок.
 
 ### Подтвержденные установленные программы на машине пользователя
-1. **DWG / DXF:** `C:\Program Files\ZWSOFT\ZWCAD 2025\ZWCAD.exe` (также есть `ZwLauncher.exe`).
+1. **DWG / DXF:** AutoCAD (путь задаётся в настройках лаунчера, параметр `settingDwgExe`).
 2. **Excel (.xlsx, .xls, .xlsm, .csv):** `C:\Program Files\Microsoft Office\Root\Office16\EXCEL.EXE`.
 3. **Word (.docx, .doc, .rtf):** `C:\Program Files\Microsoft Office\Root\Office16\WINWORD.EXE`.
 4. **PDF:** `C:\Program Files\ONLYOFFICE\DesktopEditors\DesktopEditors.exe` и `C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe`.
@@ -139,7 +136,7 @@ Launcher v3 — специализированный визуальный лау
    - Проверить в консоли браузера (DevTools F12), отправляется ли `fetch("/api/open-file", ...)` при клике на «↗» и двойном клике.
    - Добавить явное логирование в консоль: `console.log("[Launcher] Opening native file:", path)`.
 4. **Контекст запуска Windows:**
-   - Убедиться, что `server.py` запущен в интерактивной сессии пользователя (Session 1 Console), а не как изолированная служба, чтобы запущенные процессы `EXCEL.EXE`, `WINWORD.EXE`, `ZWCAD.exe` отображали свои окна на экране.
+   - Убедиться, что `server.py` запущен в интерактивной сессии пользователя (Session 1 Console), а не как изолированная служба, чтобы запущенные процессы `EXCEL.EXE`, `WINWORD.EXE`, `acad.exe` отображали свои окна на экране.
 
 ---
 
@@ -148,19 +145,15 @@ Launcher v3 — специализированный визуальный лау
 В `app/backend/server.py` реализован прямой запуск:
 ```python
 def launch_native_file(path: Path) -> str:
-    # 1. DWG -> ZWCAD.exe
-    # 2. XLSX / XLS -> EXCEL.EXE
-    # 3. DOCX / DOC -> WINWORD.EXE
-    # 4. PDF -> DesktopEditors.exe (ONLYOFFICE) / Edge
-    # 5. PNG / JPG / BMP -> mspaint.exe
-    # 6. MP4 / MKV -> vlc.exe
-    # 7. ZIP / RAR -> 7zFM.exe / WinRAR.exe
-    # 8. TXT / LOG -> notepad.exe
-    # Fallback -> os.startfile / cmd.exe start
+    # 1. DWG -> AutoCAD (путь из настроек, параметр settingDwgExe)
+    # 2. XLSX / XLS -> EXCEL.EXE (путь из настроек)
+    # 3. DOCX / DOC -> WINWORD.EXE (путь из настроек)
+    # 4. Остальное -> путь из настроек или Проводник Windows
+    # Fallback -> Проводник Windows
 ```
 
 Тестирование через HTTP POST `/api/open-file`:
-- `DWG` $\rightarrow$ `HTTP 200 (mode: zwcad-direct:ZWCAD.exe)`
+- `DWG` $\rightarrow$ `HTTP 200 (mode: custom-app:acad.exe)`
 - `XLS` $\rightarrow$ `HTTP 200 (mode: excel-direct:EXCEL.EXE)`
 - `XLSX` $\rightarrow$ `HTTP 200 (mode: excel-direct:EXCEL.EXE)`
 - `DOCX` $\rightarrow$ `HTTP 200 (mode: word-direct:WINWORD.EXE)`

@@ -26,7 +26,7 @@
 ## 2. Настоящая цель Launcher
 
 Launcher не является самостоятельным PDF/DWG/Office viewer и не должен
-соревноваться с AutoCAD, ZWCAD, Bluebeam, Excel, Word, Проводником или CDE по
+соревноваться с AutoCAD, Bluebeam, Excel, Word, Проводником или CDE по
 их главным функциям.
 
 Он является локальной **оболочкой рабочего объекта**, которая связывает:
@@ -143,7 +143,7 @@ Launcher полезен также как замена ежедневному П
 ### Этап A — довести фундамент Launcher
 
 1. **DWG без PDF-пары.**
-   - Model Space overview через ZWCAD: A0, extents, scale-to-fit, выключенные
+   - Model Space overview через AutoCAD: A0, extents, scale-to-fit, выключенные
      lineweights, read-only;
    - кэшировать PDF и обзорную PNG;
    - не скрывать DWG при ошибке preview;
@@ -176,7 +176,7 @@ Launcher полезен также как замена ежедневному П
 ### Этап B — пилот на других компьютерах
 
 1. Подготовить Windows-установку: Launcher, локальная runtime-папка,
-   проверка Python/Poppler/Office/ZWCAD или альтернативного viewer.
+   проверка Python/Poppler/Office/AutoCAD или альтернативного viewer.
 2. Добавить диагностический экран: какие нативные приложения найдены, какие
    форматы доступны, где будет храниться кэш, чего не хватает.
 3. Провести 3–5 пилотов на реальных рабочих папках разных ролей.

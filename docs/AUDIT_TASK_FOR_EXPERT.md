@@ -19,7 +19,7 @@
 - **Продукт:** локальный лаунчер для инженеров фасадной компании: подключает
   папку объекта (локальный диск или Google Drive `H:`), показывает дерево
   файлов, фильтрует по форматам, строит превью (PDF/Excel/Word/DWG-пара) и
-  открывает исходники в нативных Windows-программах (ZWCAD, Excel, Word,
+  открывает исходники в нативных Windows-программах (AutoCAD, Excel, Word,
   ONLYOFFICE, Paint, VLC, 7-Zip, Notepad).
 - **Архитектура:** браузер (frontend) ↔ локальный Python HTTP-сервер
   (backend, порт `8780`) ↔ нативные программы и конвертеры.
@@ -189,7 +189,7 @@ app.js ~+1033 строк) — это накопленные изменения �
 ### 5.1 Реальные программы (проверить пути на этом ПК)
 ```powershell
 # Примерные пути — подтвердить существование
-C:\Program Files\ZWSOFT\ZWCAD 2025\ZWCAD.exe
+C:\Program Files\Autodesk\AutoCAD 2024\acad.exe
 C:\Program Files\Microsoft Office\Root\Office16\EXCEL.EXE
 C:\Program Files\Microsoft Office\Root\Office16\WINWORD.EXE
 C:\Program Files\ONLYOFFICE\DesktopEditors\DesktopEditors.exe
@@ -201,7 +201,7 @@ C:\Program Files (x86)\WinRAR\WinRAR.exe
 %LOCALAPPDATA%\Microsoft\WindowsApps\mspaint.exe
 ```
 - Если программа установлена не по этим путям (например Office15/Office19,
-  ZWCAD 2024) — отметить расхождение.
+  AutoCAD 2025) — отметить расхождение.
 
 ### 5.2 Реестр: «мёртвые» ассоциации WPS
 Проверить `HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\<ext>\UserChoice`:
@@ -230,7 +230,7 @@ C:\Program Files (x86)\WinRAR\WinRAR.exe
 3. **Excel (.xlsx):** превью листов, переключение вкладок.
 4. **Word (.doc/.docx):** превью после конвертации Word→PDF.
 5. **DWG:** превью по PDF-паре или пустое состояние (но НЕ скрыто), открытие
-   в ZWCAD.
+   в AutoCAD.
 6. **Нативное открытие** всех форматов: кнопка в тулбаре, «↗» в строке,
    двойной клик. Убедиться, что **файл открывается ровно один раз** (дедуп
    работает).
@@ -248,7 +248,7 @@ C:\Program Files (x86)\WinRAR\WinRAR.exe
 - `convert_word_to_pdf.ps1`, `convert_excel_to_pdf.ps1`,
   `convert_xls_to_xlsx.ps1` — COM-конвертация; есть ли таймауты, падает ли на
   модальном окне (защищённый просмотр).
-- `render_dwg_model_space.ps1` — рендер DWG через ZWCAD.
+- `render_dwg_model_space.ps1` — рендер DWG через AutoCAD.
 - `package_release.ps1` — упаковка портативного архива (исключает кэши/логи,
   включает Poppler).
 - `choose_folder.py/ps1` — системный диалог выбора папки.
@@ -268,7 +268,7 @@ C:\Program Files (x86)\WinRAR\WinRAR.exe
 ## 9. Известные риски / открытые вопросы (проверить, подтвердить или опровергнуть)
 
 1. **`AllowSetForegroundWindow(0xFFFFFFFF)`** из фонового Python — считается
-   no-op. Работает «по удаче» (Office/ZWCAD сами забирают фокус). Стоит ли
+   no-op. Работает «по удаче» (Office/AutoCAD сами забирают фокус). Стоит ли
    строгое решение (suspended-режим + `ASFW(pid)`)? Оценить необходимость.
 2. **`ThreadingHTTPServer`** — поток на запрос. ОК для localhost, но при
    долгих рендерах (Word/Excel/DWG COM) много одновременных запросов могу
