@@ -13,68 +13,29 @@ if (-not (Test-Path -LiteralPath $InputPath -PathType Leaf)) {
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $OutputPath) | Out-Null
 Remove-Item -LiteralPath $OutputPath -Force -ErrorAction SilentlyContinue
 
+# Dormant fallback: executed only if render_dwg_smart.ps1 is missing
+# (see server.py script_to_run selection). Same production contract as the
+# primary paths: Layout1 / Current Layout via native AutoCAD -EXPORT PDF.
+# No legacy plotting API, no manual page-setup overrides.
+. (Join-Path $PSScriptRoot 'Invoke-NativeDwgPdfExport.ps1')
+
 $app = $null
 $document = $null
 try {
-  # Open read-only.  The original DWG and its source directory are never a
-  # write target for the preview pipeline.
-  $comProgIds = @(
-    "AutoCAD.Application.24",
-    "AutoCAD.Application"
-  )
-  $app = $null
-  foreach ($progId in $comProgIds) {
-    try {
-      $app = New-Object -ComObject $progId -ErrorAction Stop
-      if ($app) { break }
-    } catch {}
-  }
-  if (-not $app) {
-    throw "CAD COM error: AutoCAD could not be initialized."
-  }
-  $app.Visible = $false
-  $document = $app.Documents.Open($InputPath, $true)
-  $document.SetVariable("BACKGROUNDPLOT", 0)
-  try { $document.SetVariable("EXPERT", 5) } catch {}
-
-  # Model Space overview: full A0 page, extents, scale-to-fit and no plotted
-  # lineweights.  It is a fast visual map, not a replacement for CAD layouts.
-  $layout = $document.ModelSpace.Layout
-  $devices = @($layout.GetPlotDeviceNames())
-  $preferredDevices = @(
-    "DWG To PDF.pc3",
-    "AutoCAD PDF (General Documentation).pc3",
-    "AutoCAD PDF (High Quality Print).pc3",
-    "Microsoft Print to PDF"
-  )
-  foreach ($dev in $preferredDevices) {
-    if ($devices -contains $dev) {
-      $layout.ConfigName = $dev
-      $layout.RefreshPlotDeviceInfo()
-      break
-    }
-  }
-  $layout.RefreshPlotDeviceInfo()
-  $a0Media = @($layout.GetCanonicalMediaNames() | Where-Object { $_ -match "A0" } | Select-Object -First 1)
-  if ($a0Media.Count -ne 1) {
-    throw "CAD PDF-плоттер не предоставил формат A0."
-  }
-  $layout.CanonicalMediaName = $a0Media[0]
-  $layout.PlotType = 1 # acExtents
-  $layout.CenterPlot = $true
-  $layout.UseStandardScale = $true
-  $layout.StandardScale = 0 # acScaleToFit
-  $layout.PlotWithLineweights = $false
-  $layout.PlotWithPlotStyles = $true
-
-  if (-not $document.Plot.PlotToFile($OutputPath)) {
-    throw "CAD-система не подтвердила создание PDF для пространства модели."
+  $workDir = Join-Path ([System.IO.Path]::GetTempPath()) ("FEng_dwg_modelspace_" + [System.Guid]::NewGuid().ToString("N").Substring(0, 10))
+  New-Item -ItemType Directory -Force -Path $workDir | Out-Null
+  try {
+    $nativePdf = Join-Path $workDir "page_0001.pdf"
+    $exportResult = Invoke-NativeDwgPdfExport -InputPath $InputPath -OutputPdf $nativePdf `
+      -WorkDir $workDir -TimeoutSec 540 -LayoutName 'Layout1'
+    Copy-Item -LiteralPath ([string]$exportResult.pdfPath) -Destination $OutputPath -Force
+  } finally {
+    Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue
   }
   if (-not (Test-Path -LiteralPath $OutputPath) -or (Get-Item -LiteralPath $OutputPath).Length -le 1024) {
-    throw "CAD-система не создала PDF-файл превью."
+    throw "NATIVE_EXPORT_BLOCKED: model-space fallback produced no PDF."
   }
 } finally {
-  try { [LauncherMessageFilter]::Revoke() } catch {}
-  if ($document) { $document.Close($false) }
-  if ($app) { $app.Quit() }
+  if ($document) { try { $document.Close($false) } catch {} }
+  if ($app) { try { $app.Quit() } catch {} }
 }

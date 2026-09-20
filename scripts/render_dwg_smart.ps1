@@ -8,6 +8,30 @@
 $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 
+# TRACE-ONLY: monotonic timestamps, no logic changes.
+$script:traceT0 = [System.Diagnostics.Stopwatch]::StartNew()
+$script:tracePid = [System.Diagnostics.Process]::GetCurrentProcess().Id
+$script:traceLayout = ""
+function Write-Trace([string]$name) {
+    $line = ("T {0} stage={1} elapsed_ms={2} pid={3} dwg='{4}' layout='{5}' output='{6}'" -f (Get-Date -Format o), $name, [int]$script:traceT0.ElapsedMilliseconds, $script:tracePid, $InputPath, $script:traceLayout, $OutputPath)
+    [Console]::Error.WriteLine($line)
+}
+Write-Trace "T_START"
+
+# P0: при любой ошибке пишем диагноз и сохраняем temp-каталог для разбора.
+# Удаление temp — только при успехе (см. finally в конце файла).
+$script:renderStage = "init"
+$script:keepTempDir = $false
+trap {
+  $script:keepTempDir = $true
+  try {
+    if ($tempDir -and (Test-Path -LiteralPath $tempDir)) {
+      @{ ok = $false; stage = [string]$script:renderStage; error = [string]$_.Exception.Message; time = (Get-Date).ToString("o") } | ConvertTo-Json -Compress | Out-File -LiteralPath (Join-Path $tempDir "error.json") -Encoding utf8 -Force
+    }
+  } catch {}
+  exit 1
+}
+
 if (-not (Test-Path -LiteralPath $InputPath -PathType Leaf)) {
   throw "DWG-файл не найден: $InputPath"
 }
@@ -24,228 +48,46 @@ if (-not [string]::IsNullOrWhiteSpace($outputDir) -and -not (Test-Path -LiteralP
   } catch {}
 }
 
-if (-not ([System.Management.Automation.PSTypeName]'LauncherMessageFilter').Type) {
-  Add-Type -TypeDefinition @"
-using System;
-using System.Runtime.InteropServices;
-
-[ComImport(), InterfaceType(ComInterfaceType.InterfaceIsIUnknown), Guid("00000016-0000-0000-C000-000000000046")]
-public interface IOleMessageFilter
-{
-    [PreserveSig] int HandleInComingCall(int dwCallType, IntPtr hTaskCaller, int dwTickCount, IntPtr lpInterfaceInfo);
-    [PreserveSig] int RetryRejectedCall(IntPtr hTaskCallee, int dwTickCount, int dwRejectType);
-    [PreserveSig] int MessagePending(IntPtr hTaskCallee, int dwTickCount, int dwPendingType);
-}
-
-public class LauncherMessageFilter : IOleMessageFilter
-{
-    [DllImport("ole32.dll")] private static extern int CoRegisterMessageFilter(IOleMessageFilter newFilter, out IOleMessageFilter oldFilter);
-    public static void Register() {
-        IOleMessageFilter newFilter = new LauncherMessageFilter();
-        IOleMessageFilter oldFilter = null;
-        CoRegisterMessageFilter(newFilter, out oldFilter);
-    }
-    public static void Revoke() {
-        IOleMessageFilter oldFilter = null;
-        CoRegisterMessageFilter(null, out oldFilter);
-    }
-    public int HandleInComingCall(int dwCallType, IntPtr hTaskCaller, int dwTickCount, IntPtr lpInterfaceInfo) { return 0; }
-    public int RetryRejectedCall(IntPtr hTaskCallee, int dwTickCount, int dwRejectType) {
-        if (dwRejectType == 2) return 100;
-        return -1;
-    }
-    public int MessagePending(IntPtr hTaskCallee, int dwTickCount, int dwPendingType) { return 2; }
-}
-"@
-}
-[LauncherMessageFilter]::Register()
-
-# Подключение к CAD через COM-интерфейс
-$comProgIds = @(
-  "AutoCAD.Application.24",
-  "AutoCAD.Application"
-)
-
-$app = $null
-$usedProgId = ""
-foreach ($progId in $comProgIds) {
-  try {
-    $app = New-Object -ComObject $progId -ErrorAction Stop
-    if ($app) {
-      $usedProgId = $progId
-      break
-    }
-  } catch {}
-}
-
-if (-not $app) {
-  throw "Не удалось подключиться к AutoCAD через COM (проверены: $($comProgIds -join ', '))."
-}
-
-$app.Visible = $false
-$document = $null
-
+# Thin oneshot fallback: no CAD session, no COM, the document is never opened
+# here. One native export via the shared helper (identical to daemon path).
 $sessionGuid = [System.Guid]::NewGuid().ToString("N").Substring(0, 10)
 $tempDir = Join-Path ([System.IO.Path]::GetTempPath()) "FEng_dwg_render_$sessionGuid"
 New-Item -ItemType Directory -Force -Path $tempDir | Out-Null
+# P0: owner record for backend diagnostics and targeted cleanup (no CAD here).
+try {
+  @{ acadPid = 0; startedAt = (Get-Date).ToString("o"); inputPath = [string]$InputPath } | ConvertTo-Json -Compress | Out-File -LiteralPath (Join-Path $tempDir "owner.json") -Encoding utf8 -Force
+} catch {}
 
 try {
-  # Открытие в режиме 'только чтение'
-  $document = $app.Documents.Open($InputPath, $true)
-  $document.SetVariable("BACKGROUNDPLOT", 0)
-  try { $document.SetVariable("EXPERT", 5) } catch {}
+  $script:renderStage = "native-export"
 
-  # Проверка листов (Layouts)
-  $candidateLayouts = @($document.Layouts | Where-Object { -not $_.ModelType } | Sort-Object TabOrder)
-  $nonEmptyLayouts = @($candidateLayouts | Where-Object { $_.Block.Count -gt 1 })
-
+  # Native export: single paper layout (Layout1, Current Layout) via AutoCAD
+  # Core Console _.-EXPORT _PDF. No legacy plotting API, no manual page-setup overrides.
+  . (Join-Path $PSScriptRoot 'Invoke-NativeDwgPdfExport.ps1')
+  $script:renderStage = "native-export"
+  $script:traceLayout = "Layout1"
+  Write-Trace "T_LAYOUT_SELECTED"
+  $nativePdf = Join-Path $tempDir "page_0001.pdf"
+  $exportResult = Invoke-NativeDwgPdfExport -InputPath $InputPath -OutputPdf $nativePdf `
+    -WorkDir $tempDir -TimeoutSec 540 -LayoutName 'Layout1' `
+    -Trace { param($n) Write-Trace $n }
   $pagePdfPaths = [System.Collections.Generic.List[string]]::new()
-
-  if ($nonEmptyLayouts.Count -gt 0) {
-    # Экспорт листов чертежа
-    foreach ($layout in $nonEmptyLayouts) {
-      $document.ActiveLayout = $layout
-      $layout.RefreshPlotDeviceInfo()
-
-      # Выбор виртуального PDF-плоттера
-      $devices = @($layout.GetPlotDeviceNames())
-      $preferredDevices = @(
-        "DWG To PDF.pc3",
-        "AutoCAD PDF (General Documentation).pc3",
-        "AutoCAD PDF (High Quality Print).pc3",
-        "Microsoft Print to PDF"
-      )
-      foreach ($dev in $preferredDevices) {
-        if ($devices -contains $dev) {
-          $layout.ConfigName = $dev
-          $layout.RefreshPlotDeviceInfo()
-          break
-        }
-      }
-
-      # Проверка формата листа
-      $availableMedia = @($layout.GetCanonicalMediaNames())
-      if ($availableMedia.Count -gt 0) {
-        $curMedia = $layout.CanonicalMediaName
-        if (-not ($curMedia -and ($availableMedia -contains $curMedia))) {
-          $matched = $null
-          foreach ($code in @("A0", "A1", "A2", "A3", "A4")) {
-            if ($curMedia -match $code) {
-              $matched = @($availableMedia | Where-Object { $_ -match $code } | Select-Object -First 1)
-              if ($matched.Count -gt 0) { break }
-            }
-          }
-          if ($matched -and $matched.Count -gt 0) {
-            $layout.CanonicalMediaName = $matched[0]
-          } elseif ($availableMedia -contains "ISO_full_bleed_A3_(420.00_x_297.00_MM)") {
-            $layout.CanonicalMediaName = "ISO_full_bleed_A3_(420.00_x_297.00_MM)"
-          } else {
-            $layout.CanonicalMediaName = $availableMedia[0]
-          }
-        }
-      }
-
-      $layout.PlotType = 4 # acLayout
-      $layout.PlotWithLineweights = $true
-      $layout.PlotWithPlotStyles = $true
-
-      $pageFile = Join-Path $tempDir ("page_{0:D4}.pdf" -f $layout.TabOrder)
-      if ($document.Plot.PlotToFile($pageFile)) {
-        if ((Test-Path -LiteralPath $pageFile) -and (Get-Item -LiteralPath $pageFile).Length -gt 1024) {
-          $pagePdfPaths.Add($pageFile)
-        }
-      }
-    }
-  }
-
-  # Если в чертеже только пространство модели (Model Space)
-  if ($pagePdfPaths.Count -eq 0) {
-    $layout = $document.ModelSpace.Layout
-    $devices = @($layout.GetPlotDeviceNames())
-    $preferredDevices = @(
-      "DWG To PDF.pc3",
-        "AutoCAD PDF (General Documentation).pc3",
-        "AutoCAD PDF (High Quality Print).pc3",
-      "Microsoft Print to PDF"
-    )
-    foreach ($dev in $preferredDevices) {
-      if ($devices -contains $dev) {
-        $layout.ConfigName = $dev
-        $layout.RefreshPlotDeviceInfo()
-        break
-      }
-    }
-    $allMedia = @($layout.GetCanonicalMediaNames())
-    $a0 = @($allMedia | Where-Object { $_ -match "A0" } | Select-Object -First 1)
-    if ($a0.Count -gt 0) {
-      $layout.CanonicalMediaName = $a0[0]
-    } elseif ($allMedia.Count -gt 0) {
-      $layout.CanonicalMediaName = $allMedia[0]
-    }
-
-    $layout.PlotType = 1 # acExtents
-    $layout.CenterPlot = $true
-    $layout.UseStandardScale = $true
-    $layout.StandardScale = 0 # acScaleToFit
-    $layout.PlotWithLineweights = $false
-    $layout.PlotWithPlotStyles = $true
-
-    $modelPageFile = Join-Path $tempDir "page_model.pdf"
-    if ($document.Plot.PlotToFile($modelPageFile)) {
-      if ((Test-Path -LiteralPath $modelPageFile) -and (Get-Item -LiteralPath $modelPageFile).Length -gt 1024) {
-        $pagePdfPaths.Add($modelPageFile)
-      }
-    }
-  }
+  $pagePdfPaths.Add([string]$exportResult.pdfPath)
 
   if ($pagePdfPaths.Count -eq 0) {
-    throw "AutoCAD не смог сгенерировать ни одного листа PDF для чертежа."
+    throw "NATIVE_EXPORT_BLOCKED: native export produced no PDF page."
   }
 
-  # Объединение страниц в единый многостраничный PDF
+  # Native export yields exactly one page (Layout1, Current Layout): direct copy.
+  $script:renderStage = "merge"
   $tempCombinedPdf = Join-Path $tempDir "combined.pdf"
-  if ($pagePdfPaths.Count -eq 1) {
-    Copy-Item -LiteralPath $pagePdfPaths[0] -Destination $tempCombinedPdf -Force
-  } else {
-    $mergeScript = @'
-import sys
-try:
-    import fitz
-    doc = fitz.open()
-    for p in sys.argv[2:]:
-        with fitz.open(p) as page_doc:
-            doc.insert_pdf(page_doc)
-    doc.save(sys.argv[1])
-    doc.close()
-except ImportError:
-    import pypdf
-    writer = pypdf.PdfWriter()
-    for p in sys.argv[2:]:
-        reader = pypdf.PdfReader(p)
-        for page in reader.pages:
-            writer.add_page(page)
-    with open(sys.argv[1], "wb") as f:
-        writer.write(f)
-'@
-    $mergePyFile = Join-Path $tempDir "merge.py"
-    [System.IO.File]::WriteAllText($mergePyFile, $mergeScript, [System.Text.Encoding]::UTF8)
-
-    $psi = [System.Diagnostics.ProcessStartInfo]::new()
-    $psi.FileName = $PythonExe
-    $psi.Arguments = "`"$mergePyFile`" `"$tempCombinedPdf`" " + (($pagePdfPaths | ForEach-Object { "`"$_`"" }) -join " ")
-    $psi.UseShellExecute = $false
-    $psi.CreateNoWindow = $true
-    $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
-    $psi.RedirectStandardError = $true
-    $pyProc = [System.Diagnostics.Process]::Start($psi)
-    $pyProc.WaitForExit(120000)
-    if ($pyProc.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $tempCombinedPdf)) {
-      $err = $pyProc.StandardError.ReadToEnd()
-      throw "Ошибка объединения страниц PDF: $err"
-    }
+  Copy-Item -LiteralPath $pagePdfPaths[0] -Destination $tempCombinedPdf -Force
+  if (-not (Test-Path -LiteralPath $tempCombinedPdf)) {
+    throw "NATIVE_EXPORT_BLOCKED: combined PDF missing after native export."
   }
 
   # Сохранение в целевую папку рядом с DWG или резервный кэш
+  $script:renderStage = "save"
   $finalDestination = $OutputPath
   $writeSuccess = $false
   try {
@@ -262,26 +104,35 @@ except ImportError:
     }
   }
 
+  try {
+    $outExists = Test-Path -LiteralPath $finalDestination
+    $outSize = 0
+    $outSig = ""
+    if ($outExists) {
+      $outSize = (Get-Item -LiteralPath $finalDestination).Length
+      $sigBytes = [System.IO.File]::ReadAllBytes($finalDestination)[0..4]
+      $outSig = ($sigBytes | ForEach-Object { $_.ToString("X2") }) -join " "
+    }
+    [Console]::Error.WriteLine(("OUTPUT exists={0} size={1} sig={2} path='{3}'" -f $outExists, $outSize, $outSig, $finalDestination))
+  } catch {}
   $result = @{
     ok = $true
     finalPath = $finalDestination
     isLocalFolder = ($finalDestination -eq $OutputPath)
     pageCount = $pagePdfPaths.Count
-    progId = $usedProgId
+    progId = [string]$exportResult.progId
   }
+  Write-Trace "T_END"
   Write-Output ($result | ConvertTo-Json -Compress)
 } finally {
-  try { [LauncherMessageFilter]::Revoke() } catch {}
-  if ($document) {
-    try { $document.Close($false) } catch {}
-  }
-  if ($app) {
-    try { $app.Quit() } catch {}
-  }
+  Write-Trace "T_CLEANUP_BEGIN"
+  # No CAD session exists in this path: nothing to close or quit.
   [System.GC]::Collect()
   [System.GC]::WaitForPendingFinalizers()
 
-  if (Test-Path -LiteralPath $tempDir) {
+  # P0: при ошибке temp оставляем вместе с error.json для разбора.
+  if ((Test-Path -LiteralPath $tempDir) -and -not $script:keepTempDir) {
     Remove-Item -LiteralPath $tempDir -Recurse -Force -ErrorAction SilentlyContinue
   }
+  Write-Trace "T_CLEANUP_END"
 }
