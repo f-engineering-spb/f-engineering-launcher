@@ -281,7 +281,7 @@ git switch dvg-main
 - ручная настройка печати: `ConfigName`, `CanonicalMediaName`, `PlotType`,
   `UseStandardScale`, `StandardScale`, подбор media/принтера/масштаба кодом;
 - COM-открытие DWG (`Documents.Open`, `Connect-CadApp`, guard-open,
-  ownership-attach ради конвертации) — ни в daemon, ни в oneshot, ни в хелпере;
+  ownership-attach ради конвертации) — нигде в production-пути;
 - команды в живую GUI-сессию AutoCAD через COM (`SendCommand`, `PostCommand`)
   для построения PDF — сессия виснет на промптах и модальных диалогах;
 - самописные CAD-вьюверы и сторонние DWG→PDF конвертеры в production-пути;
@@ -296,10 +296,13 @@ git switch dvg-main
   `scripts/Invoke-NativeDwgPdfExport.ps1` (accoreconsole + сгенерированный
   ASCII-скрипт, ожидание по файловой системе, `_QUIT _N` — файл DWG никогда
   не сохраняется; хелпер не открывает DWG и не стартует CAD);
-- ровно один `accoreconsole.exe` на job; daemon — только диспетчер
-  (job/state/done, ready/lifecycle), CAD-сессий у production нет;
-- production-вызовы — только `scripts/render_dwg_daemon.ps1` (daemon-first)
-  и `scripts/render_dwg_smart.ps1` (тонкий oneshot без COM);
+- ровно один `accoreconsole.exe` на DWG через общий хелпер
+  `scripts/Invoke-NativeDwgPdfExport.ps1` (консоль сама открывает DWG,
+  `_QUIT _N` — файл никогда не сохраняется);
+- production-вызов — только `scripts/render_dwg_smart.ps1` напрямую из backend
+  (`dwg_to_model_pdf` → `dwg_convert_oneshot`); daemon orchestration полностью
+  удалена (старт/сабмит/ready/job/state/done-механика и daemon-скрипт
+  не используются);
 - тестировать только на byte-copy (оригинал пользователя не трогать).
 
 Критерий готовности — не HTTP 200 и не cache hit, а свежий PDF парой рядом

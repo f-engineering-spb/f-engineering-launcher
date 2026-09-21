@@ -1,6 +1,5 @@
-# Invoke-NativeDwgPdfExport.ps1 — shared native AutoCAD PDF export helper.
-# NOTE: this file is intentionally ASCII-only (no BOM, no Cyrillic) so the
-# Windows PowerShell 5.1 parser never misdecodes it.
+# Invoke-NativeDwgPdfExport.ps1 - shared native AutoCAD PDF export helper.
+# ASCII-only file: no cyrillic, no unicode dashes, no BOM.
 #
 # Mechanism (proven by probe): AutoCAD Core Console (accoreconsole.exe) runs a
 # generated script:
@@ -22,8 +21,8 @@
 #
 # Usage (dot-source, then call):
 #   . (Join-Path $PSScriptRoot 'Invoke-NativeDwgPdfExport.ps1')
-#   $r = Invoke-NativeDwgPdfExport -InputPath $dwg -OutputPdf $pdf -WorkDir $tempDir `
-#        -TimeoutSec 540 -LayoutName 'Layout1' -Trace { param($n) Write-Trace $n }
+#   $r = Invoke-NativeDwgPdfExport -InputPath $dwg -OutputPdf $pdf -WorkDir $tempDir
+#   $r = Invoke-NativeDwgPdfExport -InputPath $dwg -OutputPdf $pdf -WorkDir $tempDir -TimeoutSec 540 -LayoutName 'Layout1' -Trace { param($n) Write-Trace $n }
 
 $script:NativeExportAccorePath = ""
 
@@ -129,10 +128,12 @@ function Invoke-NativeDwgPdfExport {
     }
     try { ($outTask.Result + "`n" + $errTask.Result) | Out-File -LiteralPath $consoleLog -Encoding utf8 -Force } catch {}
   } finally {
-    try { if (-not $proc.HasExited) { $proc.Kill() } } catch {}
+    try {
+      if (-not $proc.HasExited) { $proc.Kill() }
+    } catch {}
     try { $proc.Dispose() } catch {}
   }
-  & $mark ('ACCORECONSOLE_EXIT exitcode={0}' -f $proc.ExitCode)
+  try { [string]$proc.ExitCode | Out-File -LiteralPath (Join-Path $WorkDir "native_export.rc") -Encoding ascii -Force } catch {}
   & $traceFn 'NATIVE_EXPORT_END'
 
   $logText = Read-NativeConsoleLog $consoleLog

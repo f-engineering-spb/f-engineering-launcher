@@ -10,6 +10,7 @@ $ErrorActionPreference = "Stop"
 
 # TRACE-ONLY: monotonic timestamps, no logic changes.
 $script:traceT0 = [System.Diagnostics.Stopwatch]::StartNew()
+$script:startTime = (Get-Date).ToString("o")
 $script:tracePid = [System.Diagnostics.Process]::GetCurrentProcess().Id
 $script:traceLayout = ""
 function Write-Trace([string]$name) {
@@ -24,10 +25,85 @@ $script:renderStage = "init"
 $script:keepTempDir = $false
 trap {
   $script:keepTempDir = $true
+  $errMsg = ""
+  try { $errMsg = [string]$_.Exception.Message } catch {}
+  $endTime = Get-Date
   try {
-    if ($tempDir -and (Test-Path -LiteralPath $tempDir)) {
-      @{ ok = $false; stage = [string]$script:renderStage; error = [string]$_.Exception.Message; time = (Get-Date).ToString("o") } | ConvertTo-Json -Compress | Out-File -LiteralPath (Join-Path $tempDir "error.json") -Encoding utf8 -Force
+    $diag = [ordered]@{
+      ok = $false
+      stage = [string]$script:renderStage
+      error = $errMsg
+      time = $endTime.ToString("o")
+      dwg_path = [string]$InputPath
+      output_pdf_path = [string]$OutputPath
+      start_time = [string]$script:startTime
+      end_time = $endTime.ToString("o")
+      elapsed_ms = [int]$script:traceT0.ElapsedMilliseconds
+      stage_last_reached = [string]$script:renderStage
+      layout_current = [string]$script:traceLayout
+      layout_target = "Layout1"
+      layouts_total = 1
     }
+    $pdfExists = $false
+    $pdfSize = 0
+    $pdfHeader = ""
+    try {
+      $pagePdf = Join-Path $tempDir "page_0001.pdf"
+      if ($tempDir -and (Test-Path -LiteralPath $pagePdf)) {
+        $pdfExists = $true
+        $pdfSize = (Get-Item -LiteralPath $pagePdf).Length
+        $sigBytes = [System.IO.File]::ReadAllBytes($pagePdf)[0..4]
+        $pdfHeader = [System.Text.Encoding]::ASCII.GetString($sigBytes)
+      }
+    } catch {}
+    $consoleRc = $null
+    try {
+      $rcPath = Join-Path $tempDir "native_export.rc"
+      if ($tempDir -and (Test-Path -LiteralPath $rcPath)) {
+        $consoleRc = [int](Get-Content -LiteralPath $rcPath -Raw -ErrorAction Stop).Trim()
+      }
+    } catch {}
+    $mergeStarted = ([string]$script:renderStage -in @("merge", "save"))
+    $mergeFinished = $false
+    try {
+      $combinedPdf = Join-Path $tempDir "combined.pdf"
+      if ($tempDir -and (Test-Path -LiteralPath $combinedPdf) -and (Get-Item -LiteralPath $combinedPdf).Length -gt 1024) {
+        $mergeFinished = $true
+      }
+    } catch {}
+    $diag.process_returncode = $consoleRc
+    $diag.temp_dir = [string]$tempDir
+    $diag.pdf_exists = [bool]$pdfExists
+    $diag.pdf_size = [long]$pdfSize
+    $diag.pdf_header = [string]$pdfHeader
+    $diag.merge_started = [bool]$mergeStarted
+    $diag.merge_finished = [bool]$mergeFinished
+    $preserved = ""
+    try {
+      $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
+      $failRoot = Join-Path $repoRoot "runtime\failed-renders"
+      New-Item -ItemType Directory -Force -Path $failRoot | Out-Null
+      $stem = [System.IO.Path]::GetFileNameWithoutExtension([string]$InputPath)
+      $safe = ($stem -replace "[^A-Za-z0-9_-]", "_")
+      if ($safe.Length -gt 40) { $safe = $safe.Substring(0, 40) }
+      if ([string]::IsNullOrWhiteSpace($safe)) { $safe = "dwg" }
+      $preserved = Join-Path $failRoot ((Get-Date -Format "yyyyMMdd-HHmmss") + "-" + $safe)
+      if ($tempDir -and (Test-Path -LiteralPath $tempDir)) {
+        Copy-Item -LiteralPath $tempDir -Destination $preserved -Recurse -Force -ErrorAction Stop
+      }
+    } catch { $preserved = "" }
+    $diag.preserved_dir = [string]$preserved
+    $ej = ($diag | ConvertTo-Json -Compress)
+    try {
+      if ($tempDir -and (Test-Path -LiteralPath $tempDir)) {
+        $ej | Out-File -LiteralPath (Join-Path $tempDir "error.json") -Encoding utf8 -Force
+      }
+    } catch {}
+    try {
+      if ($preserved -and (Test-Path -LiteralPath $preserved)) {
+        $ej | Out-File -LiteralPath (Join-Path $preserved "error.json") -Encoding utf8 -Force
+      }
+    } catch {}
   } catch {}
   exit 1
 }

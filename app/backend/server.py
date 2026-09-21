@@ -48,14 +48,6 @@ WORD_CONVERT_TIMEOUT_SECONDS = 120
 EXCEL_CONVERT_TIMEOUT_SECONDS = 180
 DWG_RENDER_TIMEOUT_SECONDS = 600
 DWG_MODEL_PAGE_TIMEOUT_SECONDS = 120
-DWG_DAEMON_SCRIPT = REPO_ROOT / "scripts" / "render_dwg_daemon.ps1"
-DWG_DAEMON_DIR = DWG_CACHE_DIR / "daemon"
-# Dispatcher spawn is fast (no CAD session): never wait minutes for ready.
-DWG_DAEMON_START_TIMEOUT_SECONDS = 30
-# Job acceptance window: dispatcher polls JobDir every second and writes
-# state.json synchronously on pickup. No 240s idle waits anywhere.
-DWG_DAEMON_SUBMIT_TIMEOUT_SECONDS = 10
-DWG_DAEMON_IDLE_MINUTES = 15
 MAX_XLSX_ROWS = 2000
 MAX_XLSX_COLS = 100
 POPPLER_BIN_DIR = (
@@ -550,26 +542,6 @@ def render_word(path: Path, dpi: int = DEFAULT_PDF_DPI, first_page_only: bool = 
     return document
 
 
-_DWG_DAEMON_LOCK = threading.Lock()
-_DWG_DAEMON_PROC: subprocess.Popen | None = None
-
-
-class _DwgFileError(RuntimeError):
-    """Файл не конвертируется (демон отработал, CAD отказался). Повтор разово бессмысленен."""
-
-
-def _dwg_daemon_files() -> tuple[Path, Path, Path]:
-    """Каталог заданий демона, файл готовности, лог демона."""
-    job_dir = DWG_DAEMON_DIR / "jobs"
-    job_dir.mkdir(parents=True, exist_ok=True)
-    return job_dir, DWG_DAEMON_DIR / "ready.json", RUNTIME_DIR / "logs" / "dwg-daemon.log"
-
-
-def _dwg_daemon_alive() -> bool:
-    proc = _DWG_DAEMON_PROC
-    return proc is not None and proc.poll() is None
-
-
 def _dwg_timing(event: str, **fields) -> None:
     """Append-only timing marker for the DWG dispatcher handshake.
 
@@ -585,147 +557,6 @@ def _dwg_timing(event: str, **fields) -> None:
         pass
 
 
-def ensure_dwg_daemon() -> bool:
-    """Поднять диспетчер DWG (без CAD-сессии, только очередь job).
-
-    Возвращает True, если демон готов принимать задания. При любой
-    неудаче возвращает False — вызыватель откатится на разовый запуск.
-    Стартовый таймаут короткий: диспетчер пишет ready за секунды.
-    """
-    global _DWG_DAEMON_PROC
-    with _DWG_DAEMON_LOCK:
-        if _dwg_daemon_alive():
-            return True
-        _dwg_timing("DAEMON_START_BEGIN")
-        _DWG_DAEMON_PROC = None
-        if not DWG_DAEMON_SCRIPT.exists():
-            return False
-        job_dir, ready_file, log_file = _dwg_daemon_files()
-        for stale in (ready_file, job_dir / "daemon.fatal"):
-            try:
-                if stale.exists():
-                    stale.unlink()
-            except OSError:
-                pass
-        try:
-            _DWG_DAEMON_PROC = subprocess.Popen(
-                [
-                    "powershell",
-                    "-STA",
-                    "-NoProfile",
-                    "-ExecutionPolicy",
-                    "Bypass",
-                    "-File",
-                    str(DWG_DAEMON_SCRIPT),
-                    "-JobDir",
-                    str(job_dir),
-                    "-ReadyFile",
-                    str(ready_file),
-                    "-LogFile",
-                    str(log_file),
-                    "-IdleMinutes",
-                    str(DWG_DAEMON_IDLE_MINUTES),
-                ],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                **hidden_process_kwargs(),
-            )
-        except Exception as err:
-            _DWG_DAEMON_PROC = None
-            return False
-        deadline = time.time() + DWG_DAEMON_START_TIMEOUT_SECONDS
-        while time.time() < deadline:
-            if _DWG_DAEMON_PROC.poll() is not None:
-                _DWG_DAEMON_PROC = None
-                return False
-            if (job_dir / "daemon.fatal").exists():
-                try:
-                    _DWG_DAEMON_PROC.terminate()
-                except Exception:
-                    pass
-                _DWG_DAEMON_PROC = None
-                return False
-            if ready_file.exists():
-                # Проверяем, что ready от ЭТОГО запуска, а не stale от убитого демона.
-                try:
-                    ready_data = json.loads(ready_file.read_text(encoding="utf-8"))
-                    ready_pid = int(ready_data.get("pid") or 0)
-                except Exception:
-                    ready_data = {}
-                    ready_pid = 0
-                if ready_pid == _DWG_DAEMON_PROC.pid:
-                    global _DWG_DAEMON_GUID, _DWG_DAEMON_START_NS
-                    try:
-                        _DWG_DAEMON_GUID = str(ready_data.get("daemonGuid") or "")
-                    except Exception:
-                        _DWG_DAEMON_GUID = ""
-                    try:
-                        import time as _tmod
-
-                        _DWG_DAEMON_START_NS = int(_tmod.time_ns())
-                    except Exception:
-                        _DWG_DAEMON_START_NS = 0
-                    _dwg_timing("DAEMON_READY", daemon_pid=_DWG_DAEMON_PROC.pid)
-                    return True
-            time.sleep(0.5)
-        try:
-            _DWG_DAEMON_PROC.kill()
-        except Exception:
-            pass
-        _DWG_DAEMON_PROC = None
-        return False
-
-
-def kill_dwg_daemon(reason: str) -> None:
-    """Прибить демона и только СВОЮ CAD-сессию (PID записан демоном при старте).
-
-    Чужие запущенные AutoCAD (пользовательские) не трогаем: их PID
-    старше демона и в ready.json их нет.
-    """
-    global _DWG_DAEMON_PROC
-    with _DWG_DAEMON_LOCK:
-        proc = _DWG_DAEMON_PROC
-        _DWG_DAEMON_PROC = None
-    acad_pid = 0
-    ready_guid = ""
-    try:
-        _, ready_file, _ = _dwg_daemon_files()
-        if ready_file.exists():
-            info = json.loads(ready_file.read_text(encoding="utf-8"))
-            acad_pid = int(info.get("acadPid") or 0)
-            ready_guid = str(info.get("daemonGuid") or "")
-    except Exception:
-        acad_pid = 0
-    if proc is not None:
-        try:
-            proc.terminate()
-            try:
-                proc.wait(timeout=10)
-            except Exception:
-                proc.kill()
-        except Exception:
-            pass
-    if acad_pid > 0:
-        # Убиваем только проверенно-свой CAD: guid из ready.json должен
-        # совпадать с запомненным при ensure; плюс образ, возраст и флаг.
-        policy = {
-            "image_allow": {"acad.exe"},
-            "require_automation": True,
-            "protected_pids": set(),
-        }
-        try:
-            if _DWG_DAEMON_GUID and ready_guid and ready_guid != _DWG_DAEMON_GUID:
-                policy["protected_pids"] = {acad_pid}
-            if _DWG_DAEMON_START_NS:
-                policy["min_created_ns"] = _DWG_DAEMON_START_NS
-        except Exception:
-            pass
-        try:
-            _kill_owned_acad(acad_pid, policy)
-        except Exception:
-            pass
-
-
 # --- P0: владение AutoCAD-сессиями (один job — один owned acad.exe) ---
 #
 # Правила:
@@ -734,8 +565,6 @@ def kill_dwg_daemon(reason: str) -> None:
 # - убийство по голому имени acad.exe запрещено везде в этом файле.
 _DWG_ACTIVE_PATHS: set[str] = set()
 _DWG_ACTIVE_LOCK = threading.Lock()
-_DWG_DAEMON_GUID: str = ""
-_DWG_DAEMON_START_NS: int = 0
 
 
 _DWG_ACTIVE_JOBS: dict[str, dict] = {}
@@ -1095,97 +924,111 @@ def _descendant_acad_pids(root_pid: int) -> list:
     return found
 
 
-def dwg_convert_via_daemon(
-    *,
-    input_path: Path,
-    output_path: Path,
-    fallback_path: Path,
-    timeout_seconds: int,
-) -> subprocess.CompletedProcess:
-    """Одно задание демону. Возвращает CompletedProcess как разовый запуск."""
-    if not ensure_dwg_daemon():
-        raise RuntimeError("dwg-daemon unavailable")
-    job_dir, _, _ = _dwg_daemon_files()
-    job_id = hashlib.sha1(os.urandom(16)).hexdigest()
-    job_file = job_dir / f"{job_id}.job.json"
-    done_file = job_dir / f"{job_id}.done.json"
-    state_file = job_dir / f"{job_id}.state.json"
-    job_file.write_text(
-        json.dumps(
-            {
-                "inputPath": str(input_path),
-                "outputPath": str(output_path),
-                "fallbackCachePath": str(fallback_path),
-                "pythonExe": str(sys.executable),
-            },
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
-    _dwg_timing("JOB_SUBMIT", job=job_id, path=str(input_path))
-    # Dispatcher polls JobDir every second and writes state.json synchronously
-    # on pickup. If nothing appears quickly, the daemon is deaf: kill it and
-    # fall back immediately instead of idling until the job timeout.
-    accept_deadline = time.time() + DWG_DAEMON_SUBMIT_TIMEOUT_SECONDS
-    accepted = False
-    while time.time() < accept_deadline:
-        if state_file.exists() or done_file.exists():
-            accepted = True
-            break
-        if not _dwg_daemon_alive():
-            break
-        time.sleep(0.25)
-    if accepted:
-        _dwg_timing("JOB_ACCEPTED", job=job_id, path=str(input_path))
-    else:
-        _dwg_timing("JOB_NOT_ACCEPTED", job=job_id, path=str(input_path))
-        kill_dwg_daemon("job-not-accepted")
-        raise RuntimeError(
-            f"dwg-daemon did not accept job within {DWG_DAEMON_SUBMIT_TIMEOUT_SECONDS}s"
-        )
-    deadline = time.time() + timeout_seconds
+def _dwg_safe_key(name: object) -> str:
+    """Filesystem-safe key fragment (ASCII only, bounded length)."""
     try:
-        while time.time() < deadline:
-            if state_file.exists():
-                try:
-                    st_data = json.loads(state_file.read_text(encoding="utf-8"))
-                    dwg_job_set_state(str(input_path), st_data)
-                except Exception:
-                    pass
-            if done_file.exists():
-                payload = json.loads(done_file.read_text(encoding="utf-8"))
-                if payload.get("ok"):
-                    result = payload.get("result") or {}
-                    _dwg_timing(
-                        "JOB_DONE",
-                        job=job_id,
-                        path=str(input_path),
-                        pages=result.get("pageCount", 0),
-                    )
-                    stdout_line = json.dumps(
-                        {
-                            "ok": True,
-                            "finalPath": result.get("finalPath", ""),
-                            "pageCount": result.get("pageCount", 0),
-                            "progId": result.get("progId", ""),
-                        },
-                        ensure_ascii=False,
-                    )
-                    return subprocess.CompletedProcess(
-                        args=[], returncode=0, stdout=stdout_line + "\n", stderr=""
-                    )
-                raise _DwgFileError(str(payload.get("error") or "CAD daemon failed"))
-            if not _dwg_daemon_alive():
-                raise RuntimeError("CAD daemon died mid-job")
-            time.sleep(0.25)
-    finally:
-        for temp_file in (job_file, done_file, state_file):
+        cleaned = []
+        for char in str(name or ""):
+            code = ord(char)
+            if 48 <= code <= 57 or 65 <= code <= 90 or 97 <= code <= 122 or char in "-_":
+                cleaned.append(char)
+            else:
+                cleaned.append("_")
+        key = "".join(cleaned).strip("_")[:40]
+        return key or "dwg"
+    except Exception:
+        return "dwg"
+
+
+def _dwg_oneshot_preserve_result(
+    *,
+    preserved_dir,
+    process,
+    input_path: Path,
+    output_candidates: list,
+    started_at,
+    t0: float,
+    error_text: str = "",
+) -> None:
+    """Parent-side diagnostics, independent of trap/TEMP/finally.
+
+    Writes process.json into preserved_dir. Deletes preserved_dir only when
+    the process succeeded AND the PDF validated. Never raises.
+    """
+    try:
+        ended_at = datetime.now()
+        pdf_exists = False
+        pdf_size = 0
+        pdf_header = None
+        for cand in output_candidates:
             try:
-                temp_file.unlink(missing_ok=True)
-            except OSError:
+                candidate = Path(str(cand))
+                if candidate.is_file():
+                    size = candidate.stat().st_size
+                    if size > 1024:
+                        pdf_exists = True
+                        pdf_size = size
+                        try:
+                            with open(candidate, "rb") as handle:
+                                raw = handle.read(5)
+                            if raw == b"%PDF-":
+                                pdf_header = "%PDF-"
+                            else:
+                                pdf_header = raw.hex()
+                        except Exception:
+                            pass
+                        break
+            except Exception:
+                continue
+        last_stage = ""
+        try:
+            stderr_text = ""
+            if process is not None:
+                stderr_text = str(process.stderr or "")
+            stages = []
+            for line in stderr_text.splitlines():
+                if "stage=" in line:
+                    tail = line.split("stage=", 1)[1].split()[0]
+                    cleaned = "".join(
+                        ch for ch in tail if ch.isascii() and (ch.isalnum() or ch == "_")
+                    )
+                    if cleaned:
+                        stages.append(cleaned)
+            if stages:
+                last_stage = stages[-1]
+        except Exception:
+            pass
+        record = {
+            "dwg_path": str(input_path),
+            "output_pdf_path": str(output_candidates[0]) if output_candidates else "",
+            "preserved_dir": str(preserved_dir) if preserved_dir is not None else None,
+            "backend_pid": os.getpid(),
+            "process_id": 0,
+            "returncode": (process.returncode if process is not None else None),
+            "started_at": started_at.isoformat(timespec="seconds"),
+            "ended_at": ended_at.isoformat(timespec="seconds"),
+            "elapsed_ms": int((time.time() - t0) * 1000),
+            "last_stage": last_stage,
+            "pdf_exists": pdf_exists,
+            "pdf_size": pdf_size,
+            "pdf_header": pdf_header,
+            "error": error_text,
+        }
+        if preserved_dir is None:
+            return
+        (preserved_dir / "process.json").write_text(
+            json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        ok_convert = (
+            process is not None and process.returncode == 0 and not error_text
+        )
+        if ok_convert and pdf_exists and pdf_header == "%PDF-":
+            try:
+                shutil.rmtree(preserved_dir, ignore_errors=False)
+            except Exception:
                 pass
-    kill_dwg_daemon("job-timeout")
-    raise TimeoutError(f"CAD conversion timed out after {timeout_seconds}s")
+    except Exception:
+        pass
 
 
 def dwg_convert_oneshot(
@@ -1196,7 +1039,52 @@ def dwg_convert_oneshot(
     fallback_path: Path,
     timeout_seconds: int,
 ) -> subprocess.CompletedProcess:
-    """Старый разовый запуск: новый CAD на каждый файл (fallback демона)."""
+    """Прямой native экспорт: один accoreconsole на один файл (единственный DWG-путь)."""
+    started_at = datetime.now()
+    t0 = time.time()
+    # Parent-side preserved diagnostics: created BEFORE the child starts,
+    # independent of PowerShell trap, TEMP cleaners and finally blocks.
+    preserved_dir = None
+    try:
+        stamp = started_at.strftime("%Y%m%d-%H%M%S")
+        preserved_dir = (
+            RUNTIME_DIR / "failed-renders" / f"{stamp}-{_dwg_safe_key(input_path.stem)}"
+        )
+        preserved_dir.mkdir(parents=True, exist_ok=True)
+        (preserved_dir / "request.json").write_text(
+            json.dumps(
+                {
+                    "dwg_path": str(input_path),
+                    "output_pdf_path": str(output_path),
+                    "fallback_pdf_path": str(fallback_path),
+                    "started_at": started_at.isoformat(timespec="seconds"),
+                    "backend_pid": os.getpid(),
+                    "timeout_seconds": timeout_seconds,
+                    "argv": [
+                        "powershell",
+                        "-STA",
+                        "-NoProfile",
+                        "-ExecutionPolicy",
+                        "Bypass",
+                        "-File",
+                        str(script_to_run),
+                        "-InputPath",
+                        str(input_path),
+                        "-OutputPath",
+                        str(output_path),
+                        "-FallbackCachePath",
+                        str(fallback_path),
+                        "-PythonExe",
+                        str(sys.executable),
+                    ],
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+    except Exception:
+        preserved_dir = None
     try:
         before_acads = set()
         try:
@@ -1205,32 +1093,86 @@ def dwg_convert_oneshot(
                     before_acads.add(int(row.get("pid") or 0))
         except Exception:
             before_acads = set()
-        return subprocess.run(
-            [
-                "powershell",
-                "-STA",
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                str(script_to_run),
-                "-InputPath",
-                str(input_path),
-                "-OutputPath",
-                str(output_path),
-                "-FallbackCachePath",
-                str(fallback_path),
-                "-PythonExe",
-                str(sys.executable),
-            ],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout_seconds,
-            **hidden_process_kwargs(),
+        if preserved_dir is not None:
+            out_log = preserved_dir / "stdout.log"
+            err_log = preserved_dir / "stderr.log"
+            with (
+                open(out_log, "w", encoding="utf-8", errors="replace") as out_fh,
+                open(err_log, "w", encoding="utf-8", errors="replace") as err_fh,
+            ):
+                completed = subprocess.run(
+                    [
+                        "powershell",
+                        "-STA",
+                        "-NoProfile",
+                        "-ExecutionPolicy",
+                        "Bypass",
+                        "-File",
+                        str(script_to_run),
+                        "-InputPath",
+                        str(input_path),
+                        "-OutputPath",
+                        str(output_path),
+                        "-FallbackCachePath",
+                        str(fallback_path),
+                        "-PythonExe",
+                        str(sys.executable),
+                    ],
+                    stdout=out_fh,
+                    stderr=err_fh,
+                    timeout=timeout_seconds,
+                    **hidden_process_kwargs(),
+                )
+            try:
+                stdout_text = out_log.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                stdout_text = ""
+            try:
+                stderr_text = err_log.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                stderr_text = ""
+            process = subprocess.CompletedProcess(
+                args=completed.args,
+                returncode=completed.returncode,
+                stdout=stdout_text,
+                stderr=stderr_text,
+            )
+        else:
+            process = subprocess.run(
+                [
+                    "powershell",
+                    "-STA",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(script_to_run),
+                    "-InputPath",
+                    str(input_path),
+                    "-OutputPath",
+                    str(output_path),
+                    "-FallbackCachePath",
+                    str(fallback_path),
+                    "-PythonExe",
+                    str(sys.executable),
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout_seconds,
+                **hidden_process_kwargs(),
+            )
+        _dwg_oneshot_preserve_result(
+            preserved_dir=preserved_dir,
+            process=process,
+            input_path=input_path,
+            output_candidates=[output_path, fallback_path],
+            started_at=started_at,
+            t0=t0,
         )
-    except BaseException:
+        return process
+    except BaseException as exc:
         # Powershell убит/упал: его finally не отработал, CAD-сирота остался.
         # Добиваем только НОВЫЕ automation-сессии (не трогаем интерактив).
         try:
@@ -1254,41 +1196,16 @@ def dwg_convert_oneshot(
                     pass
         except Exception:
             pass
-        raise
-
-
-def dwg_convert_process(
-    *,
-    path: Path,
-    paired_pdf: Path,
-    fallback_pdf: Path,
-    script_to_run: Path,
-) -> subprocess.CompletedProcess:
-    """Конвертация через одну CAD-сессию; при недоступности демона — разово."""
-    try:
-        return dwg_convert_via_daemon(
-            input_path=path,
-            output_path=paired_pdf,
-            fallback_path=fallback_pdf,
-            timeout_seconds=DWG_RENDER_TIMEOUT_SECONDS,
+        _dwg_oneshot_preserve_result(
+            preserved_dir=preserved_dir,
+            process=None,
+            input_path=input_path,
+            output_candidates=[output_path, fallback_path],
+            started_at=started_at,
+            t0=t0,
+            error_text=str(exc),
         )
-    except (TimeoutError, _DwgFileError):
         raise
-    except Exception:
-        # Демон ещё жив — второй CAD плодить запрещено, отдаём ошибку.
-        if _dwg_daemon_alive():
-            raise
-        _dwg_timing("FALLBACK_BEGIN", path=str(path))
-        process = dwg_convert_oneshot(
-            script_to_run=script_to_run,
-            input_path=path,
-            output_path=paired_pdf,
-            fallback_path=fallback_pdf,
-            timeout_seconds=DWG_RENDER_TIMEOUT_SECONDS,
-        )
-        if process.returncode == 0:
-            _dwg_timing("FALLBACK_PDF", path=str(path))
-        return process
 
 
 def dwg_to_model_pdf(path: Path) -> tuple[Path, bool]:
@@ -1341,13 +1258,17 @@ def dwg_to_model_pdf(path: Path) -> tuple[Path, bool]:
             except (OSError, json.JSONDecodeError):
                 pass
 
+        # Native-only: прямое разовое преобразование без orchestration демона.
+        _dwg_timing("NATIVE_ONESHOT_BEGIN", path=str(path))
         script_to_run = DWG_SMART_RENDER_SCRIPT if DWG_SMART_RENDER_SCRIPT.exists() else DWG_RENDER_SCRIPT
-        process = dwg_convert_process(
-            path=path,
-            paired_pdf=paired_pdf,
-            fallback_pdf=fallback_pdf,
+        process = dwg_convert_oneshot(
             script_to_run=script_to_run,
+            input_path=path,
+            output_path=paired_pdf,
+            fallback_path=fallback_pdf,
+            timeout_seconds=DWG_RENDER_TIMEOUT_SECONDS,
         )
+        _dwg_timing("NATIVE_ONESHOT_END", path=str(path), returncode=process.returncode)
         if process.returncode != 0:
             message = process.stderr.strip() or process.stdout.strip() or "CAD-система (AutoCAD) не смогла создать PDF для чертежа"
             raise RuntimeError(message)
